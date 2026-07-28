@@ -137,23 +137,35 @@ raise SystemExit(1 if missing else 0)
 PY
 fi
 
-# --- 5. Drive-backed checkpoint dir, symlinked into the repo ------------------
+# --- 5. Drive-backed data + checkpoint dirs, symlinked into repo ------------
 if [ -d /content/drive/MyDrive ]; then
   if [ "${CHECK_ONLY}" -eq 0 ]; then
     mkdir -p "${DRIVE_ROOT}/checkpoints" "${DRIVE_ROOT}/data"
-    # Repo artifacts/ -> Drive, so a disconnect never loses checkpoints.
+
+    # artifacts/ -> Drive root (checkpoints, logs, tokenizer)
     if [ -L "${CKPT_LINK}" ]; then
       ok "artifacts symlink already linked"
     else
       rm -rf "${CKPT_LINK}" 2>/dev/null || true
       ln -s "${DRIVE_ROOT}" "${CKPT_LINK}"
-      ok "artifacts/ → ${DRIVE_ROOT} (checkpoints persist on Drive)"
+      ok "artifacts/ -> ${DRIVE_ROOT}"
+    fi
+
+    # data/ -> Drive data dir (pretraining shards survive disconnect)
+    DATA_LINK="${REPO_DIR}/data"
+    if [ -L "${DATA_LINK}" ]; then
+      ok "data symlink already linked"
+    else
+      rm -rf "${DATA_LINK}" 2>/dev/null || true
+      ln -s "${DRIVE_ROOT}/data" "${DATA_LINK}"
+      ok "data/ -> ${DRIVE_ROOT}/data"
     fi
   else
     [ -L "${CKPT_LINK}" ] && ok "artifacts symlink present" || warn "artifacts not linked to Drive"
+    [ -L "${REPO_DIR}/data" ] && ok "data symlink present" || warn "data not linked to Drive"
   fi
 else
-  warn "No Drive — checkpoints under ${REPO_DIR}/artifacts will NOT survive a disconnect"
+  warn "No Drive — data + checkpoints will NOT survive a disconnect"
 fi
 
 # --- 6. summary ---------------------------------------------------------------

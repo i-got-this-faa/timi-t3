@@ -34,16 +34,17 @@ def main():
     print(f"Checkpoints: {ckpt_dir}")
     print(f"Data: {data_dir}")
 
-    # On Colab, mount Drive if needed
+    # On Colab, mount Drive if needed (skip if running from shell, not notebook)
     if os.path.exists("/content") and not ckpt_dir.exists():
         try:
             from google.colab import drive
 
             drive.mount("/content/drive")
             ckpt_dir = Path("/content/drive/MyDrive/kda-poc/artifacts/checkpoints_1b")
-            ckpt_dir.mkdir(parents=True, exist_ok=True)
-        except ImportError:
-            pass
+        except Exception:
+            pass  # shell mode or already mounted
+
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     assert device.type == "cuda", "CUDA required for 1B training"

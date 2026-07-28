@@ -50,15 +50,31 @@ else
   warn "nvidia-smi not found — CPU-only runtime. Training will be very slow."
 fi
 
-# --- 1. torch: use the PREINSTALLED build, never reinstall -------------------
-log "Checking preinstalled PyTorch (do not pip install torch on Colab)…"
-python3 - <<'PY' || die "torch not importable — this runtime is broken."
-import torch, sys
-print(f"[ ok ] torch {torch.__version__}  cuda_available={torch.cuda.is_available()}  "
-      f"cuda={torch.version.cuda}  device={torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu'}")
-if not torch.cuda.is_available():
-    print("[warn ] torch sees no GPU — request a GPU runtime (Runtime > Change runtime type > T4).")
-PY
+# --- 1. torch: verify GPU runtime + CUDA torch --------------------------------
+log "Verifying GPU runtime and PyTorch CUDA support…"
+
+# Step 1a: does the kernel even see a GPU?
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+  ok "nvidia-smi OK — GPU runtime confirmed"
+  HAS_GPU=1
+else
+  warn "nvidia-smi not found — CPU-only runtime. Request T4 GPU: Runtime > Change runtime type"
+  HAS_GPU=0
+fi
+
+# Step 1b: does torch have CUDA?
+TORCH_CUDA=$(python3 -c "import torch; print(torch.cuda.is_available())" 2>/dev/null || echo "False")
+
+if [ "$TORCH_CUDA" = "True" ]; then
+  python3 -c "import torch; print(f'[ ok ] torch {torch.__version__}  GPU={torch.cuda.get_device_name(0)}')"
+elif [ "$HAS_GPU" = "1" ]; then
+  warn "GPU detected but torch is CPU-only — reinstalling torch with CUDA..."
+  python3 -m pip uninstall -y torch 2>/dev/null || true
+  python3 -m pip install --quiet torch --index-url https://download.pytorch.org/whl/cu121
+  python3 -c "import torch; assert torch.cuda.is_available(), 'torch still CPU-only after reinstall'; print(f'[ ok ] torch {torch.__version__} CUDA OK')"
+else
+  warn "No GPU runtime and torch is CPU-only — training will NOT work. Request T4 GPU."
+fi
 
 # --- 2. mount Google Drive (checkpoint persistence across 12h disconnects) ---
 if [ "${CHECK_ONLY}" -eq 0 ]; then

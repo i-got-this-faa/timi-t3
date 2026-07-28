@@ -83,13 +83,18 @@ def main():
         print("Train a tokenizer first: python scripts/prepare_data.py")
         tokenizer = None
 
-    # Initial load
+    # Default to preset_1b (96 experts). Only use TOML if explicitly passed.
+    if args.config != "configs/kda_moe_1b.toml" and Path(args.config).exists():
+        config = ModelConfig.from_toml(args.config)
+    else:
+        config = ModelConfig.preset_1b()
+    config.seq_len = 2048
+
     ckpt_dir = "artifacts/checkpoints_1b"
     if args.ckpt:
         ckpt_path = Path(args.ckpt)
     else:
         ckpt_path = find_latest(ckpt_dir)
-
     if ckpt_path is None:
         print(f"No checkpoint found in {ckpt_dir}")
         sys.exit(1)

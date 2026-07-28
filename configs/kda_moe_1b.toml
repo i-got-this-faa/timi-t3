@@ -17,7 +17,7 @@ kda_use_fla = false
 
 [moe]
 use_moe = true
-n_experts = 32
+n_experts = 96
 top_k = 4
 latent_dim = 320
 expert_hidden = 660

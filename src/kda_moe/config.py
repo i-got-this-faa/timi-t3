@@ -39,8 +39,8 @@ class ModelConfig:
 
     # ── MoE ─────────────────────────────────────────────────
     use_moe: bool = True
-    n_experts: int = 96
-    top_k: int = 4
+    n_experts: int = 32
+    top_k: int = 2
     latent_dim: int = 320
     expert_hidden: int = 660
     shared_expert_hidden: int = 640
@@ -133,8 +133,8 @@ class ModelConfig:
             head_dim=64,
             use_kda=True,
             use_moe=True,
-            n_experts=96,
-            top_k=4,
+            n_experts=32,
+            top_k=2,
             latent_dim=320,
             expert_hidden=660,
             shared_expert_hidden=640,
@@ -149,19 +149,21 @@ class ModelConfig:
             total_steps=200,
             micro_batch_size=1,
             grad_accum_steps=4,
-            checkpoint_interval=20,
-            log_interval=5,
             data_mix={
-                "dclm": 0.55,
-                "fineweb": 0.10,
-                "code": 0.25,
+                "dclm": 0.45,
+                "fineweb": 0.20,
+                "code": 0.20,
                 "math": 0.10,
+                "tinystories": 0.03,
+                "markdown": 0.02,
             },
             data_caps_gb={
-                "dclm": 3.0,
-                "fineweb": 1.0,
-                "code": 3.5,
+                "dclm": 2.5,
+                "fineweb": 2.0,
+                "code": 2.5,
                 "math": 1.0,
+                "tinystories": 0.5,
+                "markdown": 0.5,
             },
         )
 
@@ -193,16 +195,20 @@ class ModelConfig:
             micro_batch_size=1,
             grad_accum_steps=4,
             data_mix={
-                "dclm": 0.55,
-                "fineweb": 0.10,
-                "code": 0.25,
+                "dclm": 0.45,
+                "fineweb": 0.20,
+                "code": 0.20,
                 "math": 0.10,
+                "tinystories": 0.03,
+                "markdown": 0.02,
             },
             data_caps_gb={
-                "dclm": 3.0,
-                "fineweb": 1.0,
-                "code": 3.5,
+                "dclm": 2.5,
+                "fineweb": 2.0,
+                "code": 2.5,
                 "math": 1.0,
+                "tinystories": 0.5,
+                "markdown": 0.5,
             },
         )
 
@@ -234,6 +240,147 @@ class ModelConfig:
             micro_batch_size=1,
             grad_accum_steps=16,
             dropout=0.0,
+        )
+
+    @classmethod
+    def preset_24m(cls) -> ModelConfig:
+        """24M scaling-law variant: 4 layers, tiny dims, ultra-fast smoke."""
+        return cls(
+            n_layers=4,
+            d_model=256,
+            n_heads=4,
+            n_kv_heads=1,
+            head_dim=64,
+            use_kda=True,
+            use_moe=True,
+            n_experts=8,
+            top_k=2,
+            latent_dim=128,
+            expert_hidden=256,
+            shared_expert_hidden=256,
+            global_attn_layers=(3,),
+            seq_len=512,
+            curriculum_start_seq=512,
+            curriculum_milestones=[],
+            lr=3e-4,
+            betas=(0.9, 0.95),
+            weight_decay=0.1,
+            warmup_steps=20,
+            total_steps=500,
+            micro_batch_size=1,
+            grad_accum_steps=4,
+            checkpoint_interval=100,
+            log_interval=10,
+            data_mix={
+                "dclm": 0.45,
+                "fineweb": 0.20,
+                "code": 0.20,
+                "math": 0.10,
+                "tinystories": 0.03,
+                "markdown": 0.02,
+            },
+            data_caps_gb={
+                "dclm": 2.5,
+                "fineweb": 2.0,
+                "code": 2.5,
+                "math": 1.0,
+                "tinystories": 0.5,
+                "markdown": 0.5,
+            },
+        )
+
+    @classmethod
+    def preset_80m(cls) -> ModelConfig:
+        """80M scaling-law variant: 8 layers, moderate dims."""
+        return cls(
+            n_layers=8,
+            d_model=384,
+            n_heads=6,
+            n_kv_heads=1,
+            head_dim=64,
+            use_kda=True,
+            use_moe=True,
+            n_experts=16,
+            top_k=2,
+            latent_dim=192,
+            expert_hidden=384,
+            shared_expert_hidden=384,
+            global_attn_layers=(3, 7),
+            seq_len=512,
+            curriculum_start_seq=512,
+            curriculum_milestones=[],
+            lr=3e-4,
+            betas=(0.9, 0.95),
+            weight_decay=0.1,
+            warmup_steps=20,
+            total_steps=500,
+            micro_batch_size=1,
+            grad_accum_steps=4,
+            checkpoint_interval=100,
+            log_interval=10,
+            data_mix={
+                "dclm": 0.45,
+                "fineweb": 0.20,
+                "code": 0.20,
+                "math": 0.10,
+                "tinystories": 0.03,
+                "markdown": 0.02,
+            },
+            data_caps_gb={
+                "dclm": 2.5,
+                "fineweb": 2.0,
+                "code": 2.5,
+                "math": 1.0,
+                "tinystories": 0.5,
+                "markdown": 0.5,
+            },
+        )
+
+    @classmethod
+    def preset_180m(cls) -> ModelConfig:
+        """180M scaling-law variant: 12 layers, mid-scale dims."""
+        return cls(
+            n_layers=12,
+            d_model=512,
+            n_heads=8,
+            n_kv_heads=2,
+            head_dim=64,
+            use_kda=True,
+            use_moe=True,
+            n_experts=24,
+            top_k=2,
+            latent_dim=256,
+            expert_hidden=512,
+            shared_expert_hidden=512,
+            global_attn_layers=(3, 7, 11),
+            seq_len=512,
+            curriculum_start_seq=512,
+            curriculum_milestones=[],
+            lr=3e-4,
+            betas=(0.9, 0.95),
+            weight_decay=0.1,
+            warmup_steps=20,
+            total_steps=500,
+            micro_batch_size=1,
+            grad_accum_steps=4,
+            checkpoint_interval=100,
+            log_interval=10,
+            data_mix={
+                "dclm": 0.45,
+                "fineweb": 0.20,
+                "code": 0.20,
+                "math": 0.10,
+                "tinystories": 0.03,
+                "markdown": 0.02,
+            },
+            data_caps_gb={
+                "dclm": 2.5,
+                "fineweb": 2.0,
+                "code": 2.5,
+                "math": 1.0,
+                "tinystories": 0.5,
+                "markdown": 0.5,
+            },
         )
 
     @classmethod

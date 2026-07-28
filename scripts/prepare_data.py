@@ -7,6 +7,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from kda_moe.config import ModelConfig
 from kda_moe.data import build_pretraining_mix
+from kda_moe.data import print_dataset_report
+
+
 from kda_moe.tokenizer import fertility_report, train_tokenizer
 
 
@@ -31,6 +34,9 @@ def main():
 
     print("\n[3/3] Fertility gate...")
     passed = fertility_report(tokenizer)
+
+    print("\n[4/4] Dataset report...")
+    print_dataset_report("artifacts/data/shards", tokenizer)
 
     print("\n" + "=" * 60)
     if passed:

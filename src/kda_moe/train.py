@@ -197,25 +197,25 @@ class Trainer:
         model = self.model
         model.train()
 
+        from .display import StatusDisplay
+
+        gpu_name = torch.cuda.get_device_name(0) if self.device.type == "cuda" else "CPU"
+        vram_total = (
+            torch.cuda.get_device_properties(0).total_memory / 1e9
+            if self.device.type == "cuda"
+            else 0
+        )
+
         total, _ = model.get_num_params()
         print(
-            f"Training: {cfg.total_steps} steps, device={self.device}, "
-            f"8bit={self.use_8bit}, seq={cfg.curriculum_start_seq}, "
-            f"model={total / 1e6:.1f}M params"
+            f"KDA-MoE 1B  |  {total / 1e6:.1f}M params  |  {cfg.total_steps} steps  |  "
+            f"8bit Adam={'on' if self.use_8bit else 'off'}",
+            flush=True,
         )
 
+        display = StatusDisplay(cfg.total_steps, gpu_name, vram_total)
         train_iter = iter(self.train_dataset) if self.train_dataset else None
         losses: list[float] = []
-
-        from tqdm import tqdm
-
-        pbar = tqdm(
-            total=cfg.total_steps,
-            initial=self.step,
-            desc="training",
-            unit="step",
-            dynamic_ncols=True,
-        )
 
         while self.step < cfg.total_steps:
             self._update_curriculum()
@@ -224,8 +224,8 @@ class Trainer:
 
             accum_loss = 0.0
             self.optimizer.zero_grad()
-
             step_t0 = time.time()
+
             for _ in range(cfg.grad_accum_steps):
                 if train_iter is None:
                     input_ids = torch.randint(
@@ -264,48 +264,54 @@ class Trainer:
             tokens = cfg.micro_batch_size * self.current_seq_len * cfg.grad_accum_steps
             self.tokens_processed += tokens
 
-            step_s = time.time() - step_t0
-            pbar.set_postfix(
-                {
-                    "loss": f"{accum_loss:.3f}",
-                    "lr": f"{lr:.1e}",
-                    "s/step": f"{step_s:.1f}",
-                    "seq": self.current_seq_len,
-                }
+            step_time = time.time() - step_t0
+            elapsed = max(time.time() - self.start_time, 0.01)
+            tok_per_sec = self.tokens_processed / elapsed
+            grad_norm = (
+                sum(p.grad.norm().item() ** 2 for p in model.parameters() if p.grad is not None)
+                ** 0.5
             )
-            pbar.update(1)
+
+            rs = self._collect_router_stats()
+            dead = sum(v for k, v in rs.items() if k.startswith("dead_"))
+            active = cfg.n_experts - dead
+
+            vram_used = (
+                torch.cuda.memory_allocated(self.device) / 1e9 if self.device.type == "cuda" else 0
+            )
+            vram_peak = (
+                torch.cuda.max_memory_allocated(self.device) / 1e9
+                if self.device.type == "cuda"
+                else 0
+            )
+            epoch = self.tokens_processed / 2.5e9
+
+            display.update(
+                step=self.step,
+                loss=accum_loss,
+                lr=lr,
+                grad_norm=grad_norm,
+                tok_per_sec=tok_per_sec,
+                step_time=step_time,
+                seq_len=self.current_seq_len,
+                vram_used=vram_used,
+                vram_peak=vram_peak,
+                active_experts=active,
+                total_experts=cfg.n_experts,
+                router_entropy=0.0,
+                epoch=epoch,
+            )
 
             if self.step % cfg.log_interval == 0:
-                elapsed = max(time.time() - self.start_time, 0.001)
-                tok_per_sec = self.tokens_processed / elapsed
-                grad_norm = (
-                    sum(p.grad.norm().item() ** 2 for p in model.parameters() if p.grad is not None)
-                    ** 0.5
-                )
-
                 self.writer.add_scalar("train/loss", accum_loss, self.step)
                 self.writer.add_scalar("train/lr", lr, self.step)
                 self.writer.add_scalar("train/grad_norm", grad_norm, self.step)
                 self.writer.add_scalar("train/tok_per_sec", tok_per_sec, self.step)
-                self.writer.add_scalar("train/seq_len", self.current_seq_len, self.step)
-
-                rs = self._collect_router_stats()
                 for k, v in rs.items():
                     self.writer.add_scalar(f"router/{k}", v, self.step)
-
-                vram = (
-                    torch.cuda.max_memory_allocated(self.device) / 1e9
-                    if self.device.type == "cuda"
-                    else 0
-                )
-                print(
-                    f"         avg | seq {self.current_seq_len} | "
-                    f"tok/s {tok_per_sec:.0f} | vram {vram:.1f}GB",
-                    flush=True,
-                )
                 losses.append(accum_loss)
 
-            if self.step % cfg.checkpoint_interval == 0:
+            if self.step % cfg.checkpoint_interval == 0 and self.step > 0:
                 save_checkpoint(
                     model,
                     self.optimizer,
@@ -317,13 +323,6 @@ class Trainer:
             if not torch.isfinite(torch.tensor(accum_loss)):
                 raise RuntimeError(f"NaN loss at step {self.step}")
 
-            # Router collapse check
-            if rs := self._collect_router_stats():
-                dead_total = sum(v for k, v in rs.items() if k.startswith("dead_"))
-                if dead_total > cfg.n_experts * 0.5:
-                    print(f"  WARNING: {dead_total} dead experts detected")
-
-        # Final checkpoint
         save_checkpoint(
             model,
             self.optimizer,
@@ -331,7 +330,6 @@ class Trainer:
             str(self.checkpoint_dir / f"step_{self.step}.pt"),
             full=True,
         )
-
         self.writer.close()
 
         return {

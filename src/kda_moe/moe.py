@@ -164,32 +164,23 @@ class LatentMoE(nn.Module):
         # Update load-balancing bias
         self.router.update_bias(expert_idx)
 
-        # Batched expert computation: compute all expert outputs, then gather
-        # Replaces O(k·E) Python loop with O(1) einsum + gather
+        # Per-expert dispatch: memory-efficient loop over active experts only
         expert_out = torch.zeros(N, self.latent_dim, device=x.device, dtype=x.dtype)
 
         for k_idx in range(self.top_k):
             idx_k = expert_idx[:, k_idx]  # (N,)
             w_k = expert_w[:, k_idx].unsqueeze(-1)  # (N, 1)
 
-            # Compute all expert gate/up/down outputs at once
-            # h_flat: (N, l), expert_gate: (E, l, h/2) -> result: (N, E, h/2)
-            all_gate = torch.einsum("nl,elh->neh", h_flat, self.expert_gate)
-            all_up = torch.einsum("nl,elh->neh", h_flat, self.expert_up)
+            for eid in idx_k.unique():
+                mask = idx_k == eid
+                h_e = h_flat[mask]  # (n_e, l)
 
-            # Gather selected expert outputs per token
-            gate = all_gate[torch.arange(N, device=x.device), idx_k]  # (N, h/2)
-            up = all_up[torch.arange(N, device=x.device), idx_k]  # (N, h/2)
+                gate = h_e @ self.expert_gate[eid]  # (n_e, h/2)
+                up = h_e @ self.expert_up[eid]
+                act = softcap(gate, 4.0) * torch.sigmoid(gate) * softcap(up, 25.0)
+                out_e = act @ self.expert_down[eid]  # (n_e, l)
 
-            # SiTUGLU activation
-            act = softcap(gate, 4.0) * torch.sigmoid(gate) * softcap(up, 25.0)  # (N, h/2)
-
-            # Down projection: gather expert_down weights
-            # expert_down: (E, h/2, l) -> gather (N, h/2, l) -> bmm with act (N, h/2)
-            down_w = self.expert_down[idx_k]  # (N, h/2, l)
-            out_e = torch.bmm(act.unsqueeze(1), down_w).squeeze(1)  # (N, l)
-
-            expert_out += w_k * out_e
+                expert_out[mask] += w_k[mask] * out_e
 
         # Shared expert
         shared_out = self.shared_down(F.silu(self.shared_up(h_flat)))

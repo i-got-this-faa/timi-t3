@@ -37,6 +37,13 @@ class SigmoidRouter(nn.Module):
             avg = N / self.n_experts
             self.expert_bias -= self.aux_free_bias_update * (counts - avg).sign()
 
+    def router_entropy(self, logits: Tensor) -> float:
+        """Compute entropy of router probability distribution."""
+        probs = torch.sigmoid(logits)
+        p_avg = probs.mean(dim=0)
+        p_avg = p_avg.clamp_min(1e-10)
+        return float(-(p_avg * p_avg.log()).sum().item())
+
 
 class LatentMoE(nn.Module):
     """MoE with grouped expert dispatch — tokens sorted by expert, batched matmul per group."""
@@ -56,6 +63,7 @@ class LatentMoE(nn.Module):
         self.n_experts = n_experts
         self.top_k = top_k
         self.half_h = expert_hidden // 2
+        self.register_buffer("last_router_logits", torch.zeros(0))
 
         self.down_proj = nn.Linear(d_model, latent_dim, bias=False)
         self.norm_down = RMSNorm(latent_dim)
@@ -129,7 +137,8 @@ class LatentMoE(nn.Module):
 
         # Down-project
         h = self.norm_down(self.down_proj(x)).view(N, self.latent_dim)
-        expert_idx, expert_w, _ = self.router(h)
+        expert_idx, expert_w, router_logits = self.router(h)
+        self.last_router_logits = router_logits.detach()
         self.router.update_bias(expert_idx)
 
         # Dispatch each top-k slot

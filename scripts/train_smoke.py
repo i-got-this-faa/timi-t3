@@ -1,4 +1,5 @@
 """P4 gate: smoke training on 450M config — train, checkpoint, generate."""
+
 import sys
 from pathlib import Path
 
@@ -16,15 +17,17 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    config = ModelConfig.preset_smoke()
-    print(f"Config: {config.n_layers} layers, d={config.d_model}, "
-          f"E={config.n_experts}, k={config.top_k}, seq={config.seq_len}")
+    config = ModelConfig.preset_180m()
+    print(
+        f"Config: {config.n_layers} layers, d={config.d_model}, "
+        f"E={config.n_experts}, k={config.top_k}, seq={config.seq_len}"
+    )
 
     # Build model
     print("Building model...")
     model = KDAMoEModel(config).to(device)
     total, _ = model.get_num_params()
-    print(f"Model: {total/1e6:.1f}M params")
+    print(f"Model: {total / 1e6:.1f}M params")
 
     # Train (no real data, uses synthetic random tokens)
     print("\nStarting smoke training...")
@@ -38,16 +41,19 @@ def main():
 
     stats = trainer.train()
 
-    print(f"\nTraining complete: {stats['total_steps']} steps, "
-          f"final_loss={stats['final_loss']:.4f}, "
-          f"tok/s={stats['tok_per_sec']:.0f}")
+    print(
+        f"\nTraining complete: {stats['total_steps']} steps, "
+        f"final_loss={stats['final_loss']:.4f}, "
+        f"tok/s={stats['tok_per_sec']:.0f}"
+    )
 
     # Checkpoint reload test
     print("\nTesting checkpoint reload...")
     model2 = KDAMoEModel(config).to(device)
     load_checkpoint(
-        model2, None,
-        "artifacts/checkpoints_smoke/step_500.safetensors",
+        model2,
+        None,
+        "artifacts/checkpoints_smoke/step_500.pt",
         device=device,
     )
     print("Checkpoint reload OK")
@@ -56,6 +62,7 @@ def main():
     print("\nTesting generation...")
     try:
         from kda_moe.tokenizer import load_tokenizer
+
         tokenizer = load_tokenizer("artifacts/tokenizer/tokenizer.json")
     except (FileNotFoundError, Exception):
         # No tokenizer trained — skip generation test

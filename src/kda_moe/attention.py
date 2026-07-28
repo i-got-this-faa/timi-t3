@@ -1,4 +1,5 @@
 """KDA attention layer and global grouped-query attention."""
+
 from __future__ import annotations
 
 import torch
@@ -73,13 +74,22 @@ class KDAAttention(nn.Module):
         # Output projection
         self.W_o = nn.Linear(inner_dim, d_model, bias=False)
         self.norm = RMSNorm(d_model)
+        self.register_buffer("last_log_decay", torch.zeros(0))
 
         self.reset_parameters()
 
     def reset_parameters(self):
         std = 0.02
-        for mod in [self.W_q, self.W_k, self.W_v, self.W_beta, self.W_g,
-                     self.W_ad, self.W_au, self.W_o]:
+        for mod in [
+            self.W_q,
+            self.W_k,
+            self.W_v,
+            self.W_beta,
+            self.W_g,
+            self.W_ad,
+            self.W_au,
+            self.W_o,
+        ]:
             nn.init.normal_(mod.weight, std=std)
         nn.init.normal_(self.A_h, std=0.1)
 
@@ -97,13 +107,22 @@ class KDAAttention(nn.Module):
 
         q, k, v, beta, log_decay, g = compute_kda_params(
             x,
-            self.conv_q, self.conv_k, self.conv_v,
-            self.W_q, self.W_k, self.W_v,
-            self.W_beta, self.W_g,
-            self.W_ad, self.W_au, self.A_h,
-            self.n_heads, self.head_dim,
+            self.conv_q,
+            self.conv_k,
+            self.conv_v,
+            self.W_q,
+            self.W_k,
+            self.W_v,
+            self.W_beta,
+            self.W_g,
+            self.W_ad,
+            self.W_au,
+            self.A_h,
+            self.n_heads,
+            self.head_dim,
             g_min=self.g_min,
         )
+        self.last_log_decay = log_decay.detach().flatten()
 
         if use_recurrent:
             o, _ = kda_recurrent(q, k, v, beta, log_decay, g)
@@ -166,7 +185,7 @@ class GlobalGQA(nn.Module):
             v = v.reshape(B, self.n_heads, T, self.head_dim)
 
         # Scaled dot-product attention (NoPE, causal)
-        scale = self.head_dim ** -0.5
+        scale = self.head_dim**-0.5
         attn = torch.matmul(q, k.transpose(-2, -1)) * scale
         causal = torch.triu(torch.ones(T, T, device=x.device, dtype=attn.dtype), diagonal=1)
         attn = attn.masked_fill(causal.bool(), float("-inf"))

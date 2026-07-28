@@ -190,6 +190,36 @@ class Trainer:
                 stats[f"bias_max_{i}"] = bias.max().item()
                 dead = (bias < -1.0).sum().item()
                 stats[f"dead_{i}"] = dead
+
+                # Router entropy from last logits
+                if ffn.last_router_logits.numel() > 0:
+                    entropy = r.router_entropy(ffn.last_router_logits)
+                    stats[f"router_entropy_{i}"] = entropy
+
+                # Expert load: fraction of tokens routed to each expert
+                if ffn.last_router_logits.numel() > 0:
+                    scores = torch.sigmoid(ffn.last_router_logits + bias)
+                    _, top_idx = torch.topk(scores, r.top_k, dim=-1)
+                    counts = torch.bincount(top_idx.flatten(), minlength=r.n_experts).float()
+                    total = counts.sum()
+                    if total > 0:
+                        load = counts / total
+                        stats[f"expert_load_min_{i}"] = load.min().item()
+                        stats[f"expert_load_max_{i}"] = load.max().item()
+                        stats[f"expert_load_std_{i}"] = load.std().item()
+
+            # KDA decay statistics
+            attn = getattr(layer, "attn", None)
+            if (
+                attn is not None
+                and hasattr(attn, "last_log_decay")
+                and attn.last_log_decay.numel() > 0
+            ):
+                ld = attn.last_log_decay
+                stats[f"kda_decay_min_{i}"] = ld.min().item()
+                stats[f"kda_decay_max_{i}"] = ld.max().item()
+                stats[f"kda_decay_mean_{i}"] = ld.mean().item()
+
         return stats
 
     def train(self) -> dict[str, Any]:
@@ -276,6 +306,10 @@ class Trainer:
             dead = sum(v for k, v in rs.items() if k.startswith("dead_"))
             active = cfg.n_experts - dead
 
+            # Average router entropy across MoE layers for display
+            entropies = [v for k, v in rs.items() if k.startswith("router_entropy_")]
+            avg_entropy = sum(entropies) / len(entropies) if entropies else 0.0
+
             vram_used = (
                 torch.cuda.memory_allocated(self.device) / 1e9 if self.device.type == "cuda" else 0
             )
@@ -298,7 +332,7 @@ class Trainer:
                 vram_peak=vram_peak,
                 active_experts=active,
                 total_experts=cfg.n_experts,
-                router_entropy=0.0,
+                router_entropy=avg_entropy,
                 epoch=epoch,
             )
 

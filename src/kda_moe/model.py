@@ -30,10 +30,10 @@ class DenseFFN(nn.Module):
 class TransformerBlock(nn.Module):
     """One transformer layer with pre-norm and optional gradient checkpointing.
 
-    Layer schedule (from plan.md §2.4):
-      Layer 0:         KDA + dense FFN
-      Layers 1-2,4-6,8-10,12-14:  KDA + MoE
-      Layers 3,7,11,15:  global GQA (no FFN in MoE mode)
+    Layer schedule:
+      Layers 0-1:       KDA + dense FFN (warm-up)
+      Layers 2,4-6,8-10,12-14:  KDA + MoE
+      Layers 3,7,11,15:  global GQA + small dense FFN
     """
 
     def __init__(self, config: ModelConfig, layer_idx: int):
@@ -65,13 +65,12 @@ class TransformerBlock(nn.Module):
         if not config.use_moe:
             # Dense baseline: all layers have dense FFN
             self.ffn: nn.Module = DenseFFN(config.d_model, config.d_model * 4)
-        elif layer_idx == 0:
-            # Layer 0: dense warmup FFN
+        elif layer_idx in (0, 1):
+            # Layers 0, 1: dense warmup FFN
             self.ffn = DenseFFN(config.d_model, config.d_model * 4)
         elif is_global:
-            # Global attention layers: no FFN in MoE mode
-            self.ffn = nn.Identity()
-            self.has_ffn = False
+            # Global attention layers: small dense FFN for nonlinear transform after mixing
+            self.ffn = DenseFFN(config.d_model, config.d_model * 2)
         else:
             self.ffn = LatentMoE(
                 d_model=config.d_model,

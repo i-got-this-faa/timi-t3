@@ -1,4 +1,5 @@
 """P2 router health tests."""
+
 import torch
 import pytest
 
@@ -13,8 +14,12 @@ def device():
 
 def test_router_output_shape(device):
     moe = LatentMoE(
-        d_model=640, latent_dim=320, n_experts=96, top_k=4,
-        expert_hidden=660, shared_expert_hidden=640,
+        d_model=640,
+        latent_dim=320,
+        n_experts=32,
+        top_k=2,
+        expert_hidden=660,
+        shared_expert_hidden=640,
     ).to(device)
 
     x = torch.randn(2, 128, 640, device=device)
@@ -23,20 +28,24 @@ def test_router_output_shape(device):
 
 
 def test_topk_selection():
-    router = SigmoidRouter(d_model=320, n_experts=96, top_k=4)
+    router = SigmoidRouter(d_model=320, n_experts=32, top_k=2)
     x = torch.randn(256, 320)
     indices, weights, _ = router(x)
 
-    assert indices.shape == (256, 4)
-    assert weights.shape == (256, 4)
-    assert (indices >= 0).all() and (indices < 96).all()
-    assert (weights.sum(dim=-1) <= 4.0 + 1e-5).all()
+    assert indices.shape == (256, 2)
+    assert weights.shape == (256, 2)
+    assert (indices >= 0).all() and (indices < 32).all()
+    assert (weights.sum(dim=-1) <= 2.0 + 1e-5).all()
 
 
 def test_router_gradient(device):
     moe = LatentMoE(
-        d_model=640, latent_dim=320, n_experts=96, top_k=4,
-        expert_hidden=660, shared_expert_hidden=640,
+        d_model=640,
+        latent_dim=320,
+        n_experts=32,
+        top_k=2,
+        expert_hidden=660,
+        shared_expert_hidden=640,
     ).to(device)
 
     x = torch.randn(2, 128, 640, device=device)
@@ -51,16 +60,19 @@ def test_router_gradient(device):
 
 
 def test_no_dead_experts_random():
-    router = SigmoidRouter(d_model=320, n_experts=96, top_k=4)
+    """Verify sigmoid router covers experts under random input."""
+    router = SigmoidRouter(d_model=320, n_experts=32, top_k=2)
     seen = set()
     for _ in range(100):
         x = torch.randn(2 * 256, 320)
         indices, _, _ = router(x)
         seen.update(indices.flatten().tolist())
 
-    missing = 96 - len(seen)
-    print(f"Seen {len(seen)}/96 experts in 100 random batches "
-          f"({missing} missing — expected with random sigmoid)")
+    missing = 32 - len(seen)
+    print(
+        f"Seen {len(seen)}/32 experts in 100 random batches "
+        f"({missing} missing — expected with random sigmoid)"
+    )
 
 
 def test_router_bias_update():

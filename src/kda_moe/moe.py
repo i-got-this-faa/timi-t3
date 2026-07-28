@@ -1,4 +1,4 @@
-"""LatentMoE: mixture-of-experts with latent-space routing, SiTUGLU, sigmoid router."""
+"""LatentMoE with grouped dispatch — sort tokens by expert, batch matmul per group."""
 
 from __future__ import annotations
 
@@ -10,17 +10,6 @@ from torch import Tensor
 
 def softcap(x: Tensor, cap: float) -> Tensor:
     return cap * torch.tanh(x / cap)
-
-
-class SiTUGLU(nn.Module):
-    def __init__(self, dim: int, hidden_dim: int | None = None):
-        super().__init__()
-        hidden_dim = hidden_dim or dim * 2
-        self.proj = nn.Linear(dim, hidden_dim * 2, bias=False)
-
-    def forward(self, x: Tensor) -> Tensor:
-        g, u = self.proj(x).chunk(2, dim=-1)
-        return softcap(g, 4.0) * torch.sigmoid(g) * softcap(u, 25.0)
 
 
 class SigmoidRouter(nn.Module):
@@ -50,6 +39,8 @@ class SigmoidRouter(nn.Module):
 
 
 class LatentMoE(nn.Module):
+    """MoE with grouped expert dispatch — tokens sorted by expert, batched matmul per group."""
+
     def __init__(
         self,
         d_model: int = 640,
@@ -64,14 +55,17 @@ class LatentMoE(nn.Module):
         self.latent_dim = latent_dim
         self.n_experts = n_experts
         self.top_k = top_k
+        self.half_h = expert_hidden // 2
 
-        half_h = expert_hidden // 2
         self.down_proj = nn.Linear(d_model, latent_dim, bias=False)
         self.norm_down = RMSNorm(latent_dim)
         self.router = SigmoidRouter(latent_dim, n_experts, top_k, aux_free_bias_update)
-        self.expert_gate = nn.Parameter(torch.empty(n_experts, latent_dim, half_h))
-        self.expert_up = nn.Parameter(torch.empty(n_experts, latent_dim, half_h))
-        self.expert_down = nn.Parameter(torch.empty(n_experts, half_h, latent_dim))
+
+        # Expert weights: (E, l, h/2) for gate/up, (E, h/2, l) for down
+        self.expert_gate = nn.Parameter(torch.empty(n_experts, latent_dim, self.half_h))
+        self.expert_up = nn.Parameter(torch.empty(n_experts, latent_dim, self.half_h))
+        self.expert_down = nn.Parameter(torch.empty(n_experts, self.half_h, latent_dim))
+
         self.shared_up = nn.Linear(latent_dim, shared_expert_hidden, bias=False)
         self.shared_down = nn.Linear(shared_expert_hidden, latent_dim, bias=False)
         self.norm_out = RMSNorm(latent_dim)
@@ -83,38 +77,73 @@ class LatentMoE(nn.Module):
         nn.init.normal_(self.expert_up, std=0.02)
         nn.init.normal_(self.expert_down, std=0.02)
 
+    def _dispatch_one_slot(self, h_flat: Tensor, idx_k: Tensor, w_k: Tensor) -> Tensor:
+        """Grouped dispatch for one top-k slot.
+
+        Sorts tokens by expert, does one batched matmul per contiguous expert group.
+        Returns (N, latent_dim) expert output for this slot.
+        """
+        N, l = h_flat.shape
+        device = h_flat.device
+        dtype = h_flat.dtype
+
+        # Sort tokens by expert ID
+        sort_order = idx_k.argsort()
+        sorted_h = h_flat[sort_order]  # (N, l)
+        sorted_w = w_k[sort_order]  # (N,)
+        sorted_eid = idx_k[sort_order]  # (N,)
+
+        # Pre-allocate output, scatter back later
+        slot_out = torch.zeros(N, l, device=device, dtype=dtype)
+
+        # Find boundaries between expert groups
+        # Use a single GPU kernel: diff then cumsum
+        boundaries = torch.where(sorted_eid[1:] != sorted_eid[:-1])[0] + 1
+        starts = torch.cat([torch.tensor([0], device=device), boundaries])
+        ends = torch.cat([boundaries, torch.tensor([N], device=device)])
+
+        for g in range(len(starts)):
+            s, e = starts[g].item(), ends[g].item()
+            if s >= e:
+                continue
+            eid = sorted_eid[s].item()
+            h_g = sorted_h[s:e]  # (n_g, l)
+            w_g = sorted_w[s:e].unsqueeze(-1)  # (n_g, 1)
+
+            # Expert FFN: gate + SiTUGLU + down
+            gate = h_g @ self.expert_gate[eid]  # (n_g, h/2)
+            up = h_g @ self.expert_up[eid]
+            act = (softcap(gate, 4.0) * torch.sigmoid(gate) * softcap(up, 25.0)).to(dtype)
+            out = (act.float() @ self.expert_down[eid]).to(dtype)  # (n_g, l)
+
+            # Scatter back
+            orig_pos = sort_order[s:e]
+            slot_out[orig_pos] = (w_g * out).to(dtype)
+
+        return slot_out
+
     def forward(self, x: Tensor) -> Tensor:
         B, T, _ = x.shape
         N = B * T
-        h = self.norm_down(self.down_proj(x))
-        h_flat = h.view(N, self.latent_dim)
-        expert_idx, expert_w, _ = self.router(h_flat)
+        device = x.device
+
+        # Down-project
+        h = self.norm_down(self.down_proj(x)).view(N, self.latent_dim)
+        expert_idx, expert_w, _ = self.router(h)
         self.router.update_bias(expert_idx)
 
-        expert_out = torch.zeros(N, self.latent_dim, device=x.device, dtype=x.dtype)
-
+        # Dispatch each top-k slot
+        out = torch.zeros(N, self.latent_dim, device=device, dtype=x.dtype)
         for k_idx in range(self.top_k):
-            idx_k = expert_idx[:, k_idx]  # (N,)
-            w_k = expert_w[:, k_idx].unsqueeze(-1)  # (N, 1)
+            out += self._dispatch_one_slot(
+                h,
+                expert_idx[:, k_idx],
+                expert_w[:, k_idx],
+            )
 
-            # Batch gate/up for ALL tokens × ALL experts (32MB each, fits easily)
-            all_gate = torch.einsum("nl,elh->neh", h_flat, self.expert_gate)  # (N,E,h/2)
-            all_up = torch.einsum("nl,elh->neh", h_flat, self.expert_up)
-
-            # Gather per-token selected expert results
-            gate = all_gate[torch.arange(N, device=x.device), idx_k]  # (N, h/2)
-            up = all_up[torch.arange(N, device=x.device), idx_k]
-            act = softcap(gate, 4.0) * torch.sigmoid(gate) * softcap(up, 25.0)
-
-            # Down projection: per-expert loop (avoids OOM on gather)
-            for eid in idx_k.unique():
-                mask = idx_k == eid
-                out_e = act[mask] @ self.expert_down[eid]  # (n_e, l)
-                expert_out[mask] += w_k[mask] * out_e
-
-        shared_out = self.shared_down(F.silu(self.shared_up(h_flat)))
-        combined = self.norm_out(expert_out + shared_out)
-        return self.up_proj(combined.view(B, T, self.latent_dim))
+        # Shared expert + output
+        shared = self.shared_down(F.silu(self.shared_up(h)))
+        return self.up_proj(self.norm_out(out + shared).view(B, T, self.latent_dim))
 
 
 class RMSNorm(nn.Module):

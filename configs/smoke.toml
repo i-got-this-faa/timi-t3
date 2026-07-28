@@ -1,0 +1,46 @@
+# Smoke config — 450M with seq=128 for fast local iteration
+
+[architecture]
+n_layers = 16
+d_model = 640
+n_heads = 10
+n_kv_heads = 2
+head_dim = 64
+vocab_size = 32000
+
+[kda]
+use_kda = true
+kda_kernel_size = 4
+kda_chunk_size = 64
+kda_g_min = -5.0
+kda_use_fla = false
+
+[moe]
+use_moe = true
+n_experts = 32
+top_k = 2
+latent_dim = 320
+expert_hidden = 768
+shared_expert_hidden = 1280
+aux_free_bias_update = 0.001
+z_loss_coeff = 0.0
+
+global_attn_layers = [3, 7, 11, 15]
+
+[training]
+seq_len = 128
+curriculum_start_seq = 128
+curriculum_milestones = []
+lr = 0.0003
+weight_decay = 0.1
+warmup_steps = 10
+total_steps = 500
+micro_batch_size = 1
+grad_accum_steps = 4
+clip_grad_norm = 1.0
+use_8bit_adam = true
+checkpoint_interval = 100
+full_checkpoint_interval = 500
+log_interval = 5
+
+[data]

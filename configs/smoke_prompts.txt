@@ -1,0 +1,5 @@
+The capital of France is
+125 * 37 =
+def fibonacci(n):
+<|system|>You are a coding agent.<|user|>Read src/main.py<|assistant|>
+<|reasoning|>Let me solve this step by step.

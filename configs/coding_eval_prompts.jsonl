@@ -1,0 +1,15 @@
+{"prompt": "<|system|>You are a coding agent.<|user|>Read the file src/config.py<|assistant|>", "expected_tool": "read", "expected_args": {"path": "src/config.py"}}
+{"prompt": "<|system|>You are a coding agent.<|user|>Write a hello world to hello.py<|assistant|>", "expected_tool": "write", "expected_args": {"path": "hello.py"}}
+{"prompt": "<|system|>You are a coding agent.<|user|>Edit line 5 of main.py to add an import<|assistant|>", "expected_tool": "edit", "expected_args": {"path": "main.py"}}
+{"prompt": "<|system|>You are a coding agent.<|user|>Search for 'TODO' in the codebase<|assistant|>", "expected_tool": "grep", "expected_args": {"pattern": "TODO"}}
+{"prompt": "<|system|>You are a coding agent.<|user|>List all Python files in src/<|assistant|>", "expected_tool": "glob", "expected_args": {"pattern": "src/**/*.py"}}
+{"prompt": "<|system|>You are a coding agent.<|user|>Run pytest on the test suite<|assistant|>", "expected_tool": "bash", "expected_args": {"command": "pytest"}}
+{"prompt": "<|system|>You are a coding agent.<|user|>What is the definition of the Model class?<|assistant|>", "expected_tool": "read", "expected_args": {"path": "model.py"}}
+{"prompt": "<|system|>You are a coding agent.<|user|>Create a new file called utils.py with helper functions<|assistant|>", "expected_tool": "write", "expected_args": {"path": "utils.py"}}
+{"prompt": "<|system|>You are a coding agent.<|user|>Find all occurrences of 'deprecated' in comments<|assistant|>", "expected_tool": "grep", "expected_args": {"pattern": "deprecated"}}
+{"prompt": "<|system|>You are a coding agent.<|user|>Delete the temporary file /tmp/test.py<|assistant|>", "expected_tool": "bash", "expected_args": {"command": "rm"}}
+{"prompt": "<|system|>You are a coding agent.<|user|>Show me the first 20 lines of README.md<|assistant|>", "expected_tool": "read", "expected_args": {"path": "README.md"}}
+{"prompt": "<|system|>You are a coding agent.<|user|>Rename function 'old_name' to 'new_name' in all files<|assistant|>", "expected_tool": "edit", "expected_args": {"path": "src"}}
+{"prompt": "<|system|>You are a coding agent.<|user|>Count the number of lines in all .py files<|assistant|>", "expected_tool": "bash", "expected_args": {"command": "wc"}}
+{"prompt": "<|system|>You are a coding agent.<|user|>Check the current git diff<|assistant|>", "expected_tool": "bash", "expected_args": {"command": "git"}}
+{"prompt": "<|system|>You are a coding agent.<|user|>Find all JSON config files in the project<|assistant|>", "expected_tool": "glob", "expected_args": {"pattern": "*.json"}}

@@ -1,0 +1,37 @@
+# Dense 100M control — vanilla 16-layer GQA+NoPE (plan.md §2.3)
+
+[architecture]
+n_layers = 16
+d_model = 512
+n_heads = 8
+n_kv_heads = 2
+head_dim = 64
+vocab_size = 32000
+
+[kda]
+use_kda = false
+
+[moe]
+use_moe = false
+n_experts = 0
+top_k = 0
+
+global_attn_layers = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+
+[training]
+seq_len = 2048
+curriculum_start_seq = 512
+curriculum_milestones = [[2000, 1024], [5000, 2048]]
+lr = 0.00015
+weight_decay = 0.1
+warmup_steps = 200
+total_steps = 10000
+micro_batch_size = 1
+grad_accum_steps = 16
+clip_grad_norm = 1.0
+use_8bit_adam = true
+checkpoint_interval = 500
+full_checkpoint_interval = 2000
+log_interval = 10
+
+[data]

@@ -1,0 +1,47 @@
+# KDA-MoE 1B — primary Colab T4 config (plan.md §2.1)
+
+[architecture]
+n_layers = 16
+d_model = 640
+n_heads = 10
+n_kv_heads = 2
+head_dim = 64
+vocab_size = 32000
+
+[kda]
+use_kda = true
+kda_kernel_size = 4
+kda_chunk_size = 64
+kda_g_min = -5.0
+kda_use_fla = false
+
+[moe]
+use_moe = true
+n_experts = 96
+top_k = 4
+latent_dim = 320
+expert_hidden = 660
+shared_expert_hidden = 640
+aux_free_bias_update = 0.001
+z_loss_coeff = 0.0
+
+global_attn_layers = [3, 7, 11, 15]
+
+[training]
+seq_len = 2048
+curriculum_start_seq = 512
+curriculum_milestones = [[2000, 1024], [5000, 2048]]
+lr = 0.00015
+weight_decay = 0.1
+warmup_steps = 200
+total_steps = 10000
+micro_batch_size = 1
+grad_accum_steps = 16
+clip_grad_norm = 1.0
+use_8bit_adam = true
+checkpoint_interval = 500
+full_checkpoint_interval = 2000
+log_interval = 10
+
+[data]
+# token mix (not GB caps — those are in data_caps_gb, set via preset)

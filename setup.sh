@@ -97,7 +97,7 @@ fi
 if [ "${CHECK_ONLY}" -eq 0 ]; then
   log "Installing Python dependencies (this may take a minute)…"
   python3 -m pip install --quiet --no-input \
-    datasets tokenizers transformers safetensors tqdm numpy einops tomli-w tensorboard \
+    datasets tokenizers transformers safetensors tqdm numpy einops tomli-w tensorboard bitsandbytes \
     || die "pip install failed"
   ok "Dependencies installed"
 
@@ -114,7 +114,7 @@ if [ "${CHECK_ONLY}" -eq 0 ]; then
 else
   python3 - <<'PY' || die "Missing dependencies — run without --check to install."
 import importlib.util
-mods = ["datasets","tokenizers","transformers","safetensors","tqdm","numpy","einops","tomli_w","tensorboard"]
+mods = ["datasets","tokenizers","transformers","safetensors","tqdm","numpy","einops","tomli_w","tensorboard","bitsandbytes"]
 missing = [m for m in mods if importlib.util.find_spec(m) is None]
 print("[ ok ] all deps importable" if not missing else f"missing: {missing}")
 raise SystemExit(1 if missing else 0)

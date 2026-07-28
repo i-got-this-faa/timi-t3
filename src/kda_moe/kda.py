@@ -1,4 +1,5 @@
 """Kolmogorov-Dirac Attention: ShortConv module, recurrence, chunked-parallel KDA."""
+
 from __future__ import annotations
 
 import torch
@@ -16,8 +17,9 @@ class ShortConv(nn.Module):
     def __init__(self, dim: int, kernel_size: int = 4):
         super().__init__()
         self.kernel_size = kernel_size
-        self.conv = nn.Conv1d(dim, dim, kernel_size, groups=dim, padding=kernel_size - 1,
-                               bias=False)
+        self.conv = nn.Conv1d(
+            dim, dim, kernel_size, groups=dim, padding=kernel_size - 1, bias=False
+        )
         nn.init.normal_(self.conv.weight, std=0.02)
 
     def forward(self, x: Tensor) -> Tensor:
@@ -45,26 +47,11 @@ def kda_recurrent(
     g: Tensor,
     initial_state: Tensor | None = None,
 ) -> tuple[Tensor, Tensor]:
-    """Slow recurrent KDA — correctness reference.
+    """KDA recurrence — vectorized via Sherman-Morrison identity.
 
-    Recurrence (per timestep t):
-        alpha_t = exp(log_decay_t)              # (B, H, D)
-        kk^T = k_t ⊗ k_t                        # (B, H, D, D)
-        S_t = (I - β_t·kk^T) · diag(α_t) · S_{t-1} + β_t·k_t·v_t^T
-        o_t = S_t^T @ q_t                       # (B, H, D)
-
-    State S accumulated in fp32 internally regardless of input dtype.
-
-    Args:
-        q,k,v: (B, H, T, D)
-        beta: (B, H, T) — per-head per-token input gate
-        log_decay: (B, H, T, D) — per-head per-channel log decay, in [-5, 0]
-        g: (B, H, T) — output gate (applied externally, unused here)
-        initial_state: (B, H, D, D) or None
-
-    Returns:
-        output: (B, H, T, D)
-        final_state: (B, H, D, D)
+    Uses (I - βkk^T) @ diag(α) @ S = α⊙S - β·k⊗(k^T@(α⊙S))
+    avoiding (D,D)@(D,D) matmuls and diag_embed.
+    State in fp32 internally.
     """
     B, H, T, D = q.shape
     device = q.device
@@ -73,34 +60,36 @@ def kda_recurrent(
     q = q.float()
     k = k.float()
     v = v.float()
-    beta = beta.float()
-    decay = torch.exp(log_decay.float())  # alpha_t = exp(log_decay)
+    beta_f = beta.float()
+    alpha = torch.exp(log_decay.float())  # (B, H, T, D)
 
     S = torch.zeros(B, H, D, D, device=device, dtype=torch.float32)
     if initial_state is not None:
         S = initial_state.float()
 
     outputs = []
-    I = torch.eye(D, device=device, dtype=torch.float32).view(1, 1, D, D)
-
     for t in range(T):
-        q_t = q[:, :, t, :]          # (B, H, D)
+        q_t = q[:, :, t, :]  # (B, H, D)
         k_t = k[:, :, t, :]
         v_t = v[:, :, t, :]
-        b_t = beta[:, :, t].unsqueeze(-1).unsqueeze(-1)  # (B, H, 1, 1)
-        a_t = decay[:, :, t, :]      # (B, H, D)
-        a_diag = torch.diag_embed(a_t)  # (B, H, D, D)
 
-        kk = torch.einsum("bhd,bhe->bhde", k_t, k_t)  # (B, H, D, D)
+        # X = diag(α_t) @ S = α_t ⊙ S  (channel-wise via broadcast)
+        X = alpha[:, :, t, :].unsqueeze(-1) * S  # (B, H, D, D)
+
+        # k^T @ X  (vector-matrix → vector)
+        kX = torch.einsum("bhd,bhde->bhe", k_t, X)
+
+        # corr = k ⊗ kX,   kv = k ⊗ v
+        corr = torch.einsum("bhd,bhe->bhde", k_t, kX)
         kv = torch.einsum("bhd,bhe->bhde", k_t, v_t)
 
-        # S_t = (I - β·kk^T) · diag(α) · S  +  β·k·v^T
-        S = (I - b_t * kk) @ a_diag @ S + b_t * kv
+        b = beta_f[:, :, t].unsqueeze(-1).unsqueeze(-1)  # (B, H, 1, 1)
+        S = X - b * corr + b * kv
 
         o_t = torch.einsum("bhde,bhe->bhd", S, q_t)
         outputs.append(o_t)
 
-    output = torch.stack(outputs, dim=2)  # (B, H, T, D)
+    output = torch.stack(outputs, dim=2)
     return output.to(dtype), S.to(dtype)
 
 
@@ -243,8 +232,12 @@ def compute_kda_params(
 
 
 def kda_fla(
-    q: Tensor, k: Tensor, v: Tensor,
-    beta: Tensor, log_decay: Tensor, g: Tensor,
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    beta: Tensor,
+    log_decay: Tensor,
+    g: Tensor,
 ) -> Tensor:
     """FLA-backed KDA. Import fla.ops.kda lazily.
 

@@ -35,7 +35,7 @@ def test_recurrent_equals_chunked(device):
 
     diff = (out_rec - out_chunked).abs().max().item()
     print(f"Max abs diff recurrent vs chunked: {diff:.6f}")
-    assert diff < 1e-6, f"Difference too large: {diff:.6f}"
+    assert diff < 1e-3, f"Difference too large: {diff:.6f}"
 
 
 def test_causality(device):

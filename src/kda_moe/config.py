@@ -133,7 +133,7 @@ class ModelConfig:
             head_dim=64,
             use_kda=True,
             use_moe=True,
-            n_experts=96,
+            n_experts=32,
             top_k=4,
             latent_dim=320,
             expert_hidden=660,

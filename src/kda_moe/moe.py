@@ -9,15 +9,10 @@ from torch import Tensor
 
 
 def softcap(x: Tensor, cap: float) -> Tensor:
-    """Soft capping: cap * tanh(x / cap)."""
     return cap * torch.tanh(x / cap)
 
 
 class SiTUGLU(nn.Module):
-    """SiTU-GLU activation: softcap(g, 4) * sigmoid(g) * softcap(u, 25)
-    where (g, u) = split(proj(x)).
-    """
-
     def __init__(self, dim: int, hidden_dim: int | None = None):
         super().__init__()
         hidden_dim = hidden_dim or dim * 2
@@ -29,72 +24,32 @@ class SiTUGLU(nn.Module):
 
 
 class SigmoidRouter(nn.Module):
-    """Projects d_model→n_experts, sigmoid, top-k.
-
-    Uses auxiliary-loss-free load balancing via per-expert bias.
-    """
-
     def __init__(
-        self,
-        d_model: int,
-        n_experts: int,
-        top_k: int = 4,
-        aux_free_bias_update: float = 0.001,
+        self, d_model: int, n_experts: int, top_k: int = 4, aux_free_bias_update: float = 0.001
     ):
         super().__init__()
         self.n_experts = n_experts
         self.top_k = top_k
         self.aux_free_bias_update = aux_free_bias_update
-
         self.weight = nn.Parameter(torch.empty(d_model, n_experts))
         self.register_buffer("expert_bias", torch.zeros(n_experts))
         nn.init.normal_(self.weight, std=0.02)
 
     def forward(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        """Route tokens to experts.
-
-        Args:
-            x: (N, d_model)
-
-        Returns:
-            expert_indices: (N, top_k)
-            expert_weights: (N, top_k)
-            router_logits: (N, n_experts)
-        """
         logits = x @ self.weight
         scores = torch.sigmoid(logits + self.expert_bias)
         topk_scores, topk_indices = torch.topk(scores, self.top_k, dim=-1)
         return topk_indices, topk_scores, logits
 
     def update_bias(self, expert_indices: Tensor):
-        """Auxiliary-loss-free load balancing.
-
-        Decrements bias of overloaded experts, increments underloaded ones.
-        """
         with torch.no_grad():
-            N = expert_indices.numel()  # total assignments = N_tokens * top_k
+            N = expert_indices.numel()
             counts = torch.bincount(expert_indices.flatten(), minlength=self.n_experts).float()
             avg = N / self.n_experts
             self.expert_bias -= self.aux_free_bias_update * (counts - avg).sign()
 
-    def router_entropy(self, logits: Tensor) -> float:
-        """Compute average assignment entropy for monitoring."""
-        with torch.no_grad():
-            probs = torch.softmax(logits, dim=-1)
-            entropy = -(probs * torch.log(probs + 1e-10)).sum(dim=-1).mean()
-            return entropy.item()
-
 
 class LatentMoE(nn.Module):
-    """MoE with latent-space routing.
-
-    x → down-proj to latent (l) → sigmoid router top-k → per-expert FFN
-    (l→hidden→l) → weighted sum + shared expert → up-proj to d_model.
-
-    Memory-optimized: dispatches tokens per-expert instead of gathering
-    all expert weight matrices for all tokens simultaneously.
-    """
-
     def __init__(
         self,
         d_model: int = 640,
@@ -106,34 +61,21 @@ class LatentMoE(nn.Module):
         aux_free_bias_update: float = 0.001,
     ):
         super().__init__()
-        self.d_model = d_model
         self.latent_dim = latent_dim
         self.n_experts = n_experts
         self.top_k = top_k
-        self.expert_hidden = expert_hidden
 
-        # Down-projection: d_model → latent_dim
+        half_h = expert_hidden // 2
         self.down_proj = nn.Linear(d_model, latent_dim, bias=False)
         self.norm_down = RMSNorm(latent_dim)
-
-        # Router in latent space
         self.router = SigmoidRouter(latent_dim, n_experts, top_k, aux_free_bias_update)
-
-        # Per-expert FFNs: (l → hidden → l)
-        # expert_gate/expert_up are (E, l, hidden/2) for SiTU-GLU
-        half_hidden = expert_hidden // 2
-        self.expert_gate = nn.Parameter(torch.empty(n_experts, latent_dim, half_hidden))
-        self.expert_up = nn.Parameter(torch.empty(n_experts, latent_dim, half_hidden))
-        self.expert_down = nn.Parameter(torch.empty(n_experts, half_hidden, latent_dim))
-
-        # Shared expert in latent space
+        self.expert_gate = nn.Parameter(torch.empty(n_experts, latent_dim, half_h))
+        self.expert_up = nn.Parameter(torch.empty(n_experts, latent_dim, half_h))
+        self.expert_down = nn.Parameter(torch.empty(n_experts, half_h, latent_dim))
         self.shared_up = nn.Linear(latent_dim, shared_expert_hidden, bias=False)
         self.shared_down = nn.Linear(shared_expert_hidden, latent_dim, bias=False)
-
-        # Output
         self.norm_out = RMSNorm(latent_dim)
         self.up_proj = nn.Linear(latent_dim, d_model, bias=False)
-
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -142,61 +84,33 @@ class LatentMoE(nn.Module):
         nn.init.normal_(self.expert_down, std=0.02)
 
     def forward(self, x: Tensor) -> Tensor:
-        """Forward pass.
-
-        Args:
-            x: (B, T, d_model)
-
-        Returns:
-            (B, T, d_model)
-        """
         B, T, _ = x.shape
         N = B * T
-
-        # Down-project to latent space
-        h = self.norm_down(self.down_proj(x))  # (B, T, l)
-        h_flat = h.view(N, self.latent_dim)  # (N, l)
-
-        # Route
-        expert_idx, expert_w, router_logits = self.router(h_flat)
-        # expert_idx: (N, k), expert_w: (N, k)
-
-        # Update load-balancing bias
+        h = self.norm_down(self.down_proj(x))
+        h_flat = h.view(N, self.latent_dim)
+        expert_idx, expert_w, _ = self.router(h_flat)
         self.router.update_bias(expert_idx)
 
-        # Per-expert dispatch: memory-efficient loop over active experts only
         expert_out = torch.zeros(N, self.latent_dim, device=x.device, dtype=x.dtype)
 
         for k_idx in range(self.top_k):
-            idx_k = expert_idx[:, k_idx]  # (N,)
-            w_k = expert_w[:, k_idx].unsqueeze(-1)  # (N, 1)
-
+            idx_k = expert_idx[:, k_idx]
+            w_k = expert_w[:, k_idx].unsqueeze(-1)
             for eid in idx_k.unique():
                 mask = idx_k == eid
-                h_e = h_flat[mask]  # (n_e, l)
-
-                gate = h_e @ self.expert_gate[eid]  # (n_e, h/2)
+                h_e = h_flat[mask]
+                gate = h_e @ self.expert_gate[eid]
                 up = h_e @ self.expert_up[eid]
                 act = softcap(gate, 4.0) * torch.sigmoid(gate) * softcap(up, 25.0)
-                out_e = act @ self.expert_down[eid]  # (n_e, l)
-
+                out_e = act @ self.expert_down[eid]
                 expert_out[mask] += w_k[mask] * out_e
 
-        # Shared expert
         shared_out = self.shared_down(F.silu(self.shared_up(h_flat)))
-
-        # Combine
-        combined = expert_out + shared_out
-        combined = self.norm_out(combined)
-        combined = combined.view(B, T, self.latent_dim)
-        out = self.up_proj(combined)
-
-        return out
+        combined = self.norm_out(expert_out + shared_out)
+        return self.up_proj(combined.view(B, T, self.latent_dim))
 
 
 class RMSNorm(nn.Module):
-    """Root-Mean-Square Layer Normalization (local copy for moe.py independence)."""
-
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps

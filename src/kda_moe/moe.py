@@ -1,4 +1,5 @@
 """LatentMoE: mixture-of-experts with latent-space routing, SiTUGLU, sigmoid router."""
+
 from __future__ import annotations
 
 import torch
@@ -154,7 +155,7 @@ class LatentMoE(nn.Module):
 
         # Down-project to latent space
         h = self.norm_down(self.down_proj(x))  # (B, T, l)
-        h_flat = h.view(N, self.latent_dim)     # (N, l)
+        h_flat = h.view(N, self.latent_dim)  # (N, l)
 
         # Route
         expert_idx, expert_w, router_logits = self.router(h_flat)
@@ -163,30 +164,32 @@ class LatentMoE(nn.Module):
         # Update load-balancing bias
         self.router.update_bias(expert_idx)
 
-        # Compute per-expert outputs efficiently:
-        # Instead of gathering all expert matrices at once, dispatch tokens
-        # to their selected experts and batch per unique expert.
+        # Batched expert computation: compute all expert outputs, then gather
+        # Replaces O(k·E) Python loop with O(1) einsum + gather
         expert_out = torch.zeros(N, self.latent_dim, device=x.device, dtype=x.dtype)
 
-        # Process each of the k slots
         for k_idx in range(self.top_k):
-            idx_k = expert_idx[:, k_idx]           # (N,) — expert IDs for this slot
+            idx_k = expert_idx[:, k_idx]  # (N,)
             w_k = expert_w[:, k_idx].unsqueeze(-1)  # (N, 1)
 
-            # For each unique expert, process its assigned tokens at once
-            for eid in range(self.n_experts):
-                mask = (idx_k == eid)
-                if not mask.any():
-                    continue
-                h_e = h_flat[mask]  # (n_e, l)
+            # Compute all expert gate/up/down outputs at once
+            # h_flat: (N, l), expert_gate: (E, l, h/2) -> result: (N, E, h/2)
+            all_gate = torch.einsum("nl,elh->neh", h_flat, self.expert_gate)
+            all_up = torch.einsum("nl,elh->neh", h_flat, self.expert_up)
 
-                # Expert FFN: gate projection + SiTUGLU activation
-                gate = h_e @ self.expert_gate[eid]  # (n_e, h/2)
-                up = h_e @ self.expert_up[eid]       # (n_e, h/2)
-                act = softcap(gate, 4.0) * torch.sigmoid(gate) * softcap(up, 25.0)
-                out_e = act @ self.expert_down[eid]  # (n_e, l)
+            # Gather selected expert outputs per token
+            gate = all_gate[torch.arange(N, device=x.device), idx_k]  # (N, h/2)
+            up = all_up[torch.arange(N, device=x.device), idx_k]  # (N, h/2)
 
-                expert_out[mask] += w_k[mask] * out_e
+            # SiTUGLU activation
+            act = softcap(gate, 4.0) * torch.sigmoid(gate) * softcap(up, 25.0)  # (N, h/2)
+
+            # Down projection: gather expert_down weights
+            # expert_down: (E, h/2, l) -> gather (N, h/2, l) -> bmm with act (N, h/2)
+            down_w = self.expert_down[idx_k]  # (N, h/2, l)
+            out_e = torch.bmm(act.unsqueeze(1), down_w).squeeze(1)  # (N, l)
+
+            expert_out += w_k * out_e
 
         # Shared expert
         shared_out = self.shared_down(F.silu(self.shared_up(h_flat)))

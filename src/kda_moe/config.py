@@ -148,7 +148,7 @@ class ModelConfig:
             warmup_steps=200,
             total_steps=10000,
             micro_batch_size=1,
-            grad_accum_steps=16,
+            grad_accum_steps=4,
             data_mix={
                 "dclm": 0.55,
                 "fineweb": 0.10,

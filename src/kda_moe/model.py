@@ -1,11 +1,10 @@
-"""Full KDA-MoE transformer model with gradient checkpointing."""
+"""Full KDA-MoE transformer model."""
+
 from __future__ import annotations
 
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-from torch.utils.checkpoint import checkpoint
 
 from .config import ModelConfig
 from .attention import KDAAttention, GlobalGQA, RMSNorm
@@ -91,22 +90,15 @@ class TransformerBlock(nn.Module):
         # Dropout (only for dense baseline)
         self.dropout = nn.Dropout(config.dropout) if config.dropout > 0 else nn.Identity()
 
-    def _attn_sublayer(self, x: Tensor) -> Tensor:
-        """Attention sublayer — checkpointed for memory savings."""
+    def forward(self, x: Tensor) -> Tensor:
+        # Attention sublayer
         residual = x
         x = self.norm1(x)
         x = self.attn(x)
         x = self.dropout(x)
-        return residual + x
+        x = residual + x
 
-    def forward(self, x: Tensor) -> Tensor:
-        # Attention: checkpointed during training
-        if self.training:
-            x = checkpoint(self._attn_sublayer, x, use_reentrant=False)
-        else:
-            x = self._attn_sublayer(x)
-
-        # FFN: NOT checkpointed (avoids MoE non-determinism issues)
+        # FFN sublayer
         if self.has_ffn:
             residual = x
             x = self.norm2(x)  # type: ignore[operator]
@@ -131,9 +123,7 @@ class KDAMoEModel(nn.Module):
 
         self.token_embedding = nn.Embedding(config.vocab_size, config.d_model, padding_idx=0)
 
-        self.layers = nn.ModuleList([
-            TransformerBlock(config, i) for i in range(config.n_layers)
-        ])
+        self.layers = nn.ModuleList([TransformerBlock(config, i) for i in range(config.n_layers)])
 
         self.norm = RMSNorm(config.d_model)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
@@ -177,7 +167,8 @@ class KDAMoEModel(nn.Module):
         """Cross-entropy loss with ignore_index."""
         B, T, V = logits.shape
         return F.cross_entropy(
-            logits.reshape(B * T, V), targets.reshape(B * T),
+            logits.reshape(B * T, V),
+            targets.reshape(B * T),
             ignore_index=ignore_index,
         )
 

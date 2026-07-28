@@ -94,15 +94,22 @@ class LatentMoE(nn.Module):
         expert_out = torch.zeros(N, self.latent_dim, device=x.device, dtype=x.dtype)
 
         for k_idx in range(self.top_k):
-            idx_k = expert_idx[:, k_idx]
-            w_k = expert_w[:, k_idx].unsqueeze(-1)
+            idx_k = expert_idx[:, k_idx]  # (N,)
+            w_k = expert_w[:, k_idx].unsqueeze(-1)  # (N, 1)
+
+            # Batch gate/up for ALL tokens × ALL experts (32MB each, fits easily)
+            all_gate = torch.einsum("nl,elh->neh", h_flat, self.expert_gate)  # (N,E,h/2)
+            all_up = torch.einsum("nl,elh->neh", h_flat, self.expert_up)
+
+            # Gather per-token selected expert results
+            gate = all_gate[torch.arange(N, device=x.device), idx_k]  # (N, h/2)
+            up = all_up[torch.arange(N, device=x.device), idx_k]
+            act = softcap(gate, 4.0) * torch.sigmoid(gate) * softcap(up, 25.0)
+
+            # Down projection: per-expert loop (avoids OOM on gather)
             for eid in idx_k.unique():
                 mask = idx_k == eid
-                h_e = h_flat[mask]
-                gate = h_e @ self.expert_gate[eid]
-                up = h_e @ self.expert_up[eid]
-                act = softcap(gate, 4.0) * torch.sigmoid(gate) * softcap(up, 25.0)
-                out_e = act @ self.expert_down[eid]
+                out_e = act[mask] @ self.expert_down[eid]  # (n_e, l)
                 expert_out[mask] += w_k[mask] * out_e
 
         shared_out = self.shared_down(F.silu(self.shared_up(h_flat)))

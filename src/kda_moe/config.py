@@ -1,4 +1,5 @@
 """Model configuration dataclass with TOML I/O and presets."""
+
 from __future__ import annotations
 
 import tomllib
@@ -149,16 +150,16 @@ class ModelConfig:
             micro_batch_size=1,
             grad_accum_steps=16,
             data_mix={
-                "mlfoundations/dclm-baseline-1.0": 0.55,
-                "HuggingFaceFW/fineweb-edu": 0.10,
-                "code-search-net/code_search_net": 0.25,
-                "EleutherAI/proof-pile-2": 0.10,
+                "dclm": 0.55,
+                "fineweb": 0.10,
+                "code": 0.25,
+                "math": 0.10,
             },
             data_caps_gb={
-                "mlfoundations/dclm-baseline-1.0": 3.0,
-                "HuggingFaceFW/fineweb-edu": 1.0,
-                "code-search-net/code_search_net": 3.5,
-                "EleutherAI/proof-pile-2": 1.0,
+                "dclm": 3.0,
+                "fineweb": 1.0,
+                "code": 3.5,
+                "math": 1.0,
             },
         )
 
@@ -190,16 +191,16 @@ class ModelConfig:
             micro_batch_size=1,
             grad_accum_steps=4,
             data_mix={
-                "mlfoundations/dclm-baseline-1.0": 0.55,
-                "HuggingFaceFW/fineweb-edu": 0.10,
-                "code-search-net/code_search_net": 0.25,
-                "EleutherAI/proof-pile-2": 0.10,
+                "dclm": 0.55,
+                "fineweb": 0.10,
+                "code": 0.25,
+                "math": 0.10,
             },
             data_caps_gb={
-                "mlfoundations/dclm-baseline-1.0": 3.0,
-                "HuggingFaceFW/fineweb-edu": 1.0,
-                "code-search-net/code_search_net": 3.5,
-                "EleutherAI/proof-pile-2": 1.0,
+                "dclm": 3.0,
+                "fineweb": 1.0,
+                "code": 3.5,
+                "math": 1.0,
             },
         )
 

@@ -4,6 +4,7 @@ Usage (Colab):
     %cd /content/drive/MyDrive/kda-poc
     !python scripts/train_colab.py
 """
+
 import os
 import sys
 from pathlib import Path
@@ -27,7 +28,7 @@ def main():
     # Environment
     repo_dir = Path(os.environ.get("REPO_DIR", Path(__file__).resolve().parent.parent))
     ckpt_dir = Path(os.environ.get("CKPT_DIR", "artifacts/checkpoints_1b"))
-    data_dir = Path(os.environ.get("DATA_DIR", "data"))
+    data_dir = Path(os.environ.get("DATA_DIR", "artifacts/data"))
 
     print(f"Repo: {repo_dir}")
     print(f"Checkpoints: {ckpt_dir}")
@@ -37,6 +38,7 @@ def main():
     if os.path.exists("/content") and not ckpt_dir.exists():
         try:
             from google.colab import drive
+
             drive.mount("/content/drive")
             ckpt_dir = Path("/content/drive/MyDrive/kda-poc/artifacts/checkpoints_1b")
             ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -49,8 +51,10 @@ def main():
 
     # Config
     config = ModelConfig.preset_1b()
-    print(f"Config: {config.n_layers} layers, d={config.d_model}, "
-          f"E={config.n_experts}, k={config.top_k}")
+    print(
+        f"Config: {config.n_layers} layers, d={config.d_model}, "
+        f"E={config.n_experts}, k={config.top_k}"
+    )
 
     # Data
     train_dir = data_dir / "shards"
@@ -64,17 +68,21 @@ def main():
     else:
         tokenizer = load_tokenizer("artifacts/tokenizer/tokenizer.json")
         train_dataset = PretrainingDataset(
-            str(train_dir), tokenizer, seq_len=config.curriculum_start_seq,
+            str(train_dir),
+            tokenizer,
+            seq_len=config.curriculum_start_seq,
         )
         val_dataset = PretrainingDataset(
-            str(val_dir), tokenizer, seq_len=config.curriculum_start_seq,
+            str(val_dir),
+            tokenizer,
+            seq_len=config.curriculum_start_seq,
         )
 
     # Model
     print("Building model...")
     model = KDAMoEModel(config).to(device)
     total, _ = model.get_num_params()
-    print(f"Model: {total/1e6:.1f}M params")
+    print(f"Model: {total / 1e6:.1f}M params")
 
     # Clear CUDA cache
     torch.cuda.empty_cache()
@@ -92,8 +100,10 @@ def main():
 
     try:
         stats = trainer.train()
-        print(f"\nTraining complete: {stats['total_steps']} steps, "
-              f"final_loss={stats['final_loss']:.4f}")
+        print(
+            f"\nTraining complete: {stats['total_steps']} steps, "
+            f"final_loss={stats['final_loss']:.4f}"
+        )
     except RuntimeError as e:
         if "OOM" in str(e):
             print("OOM! Reducing sequence length and retrying...")
@@ -103,8 +113,10 @@ def main():
                 (m[0], min(m[1], 1024)) for m in config.curriculum_milestones
             ]
             trainer = Trainer(
-                model=model, config=config,
-                train_dataset=train_dataset, val_dataset=val_dataset,
+                model=model,
+                config=config,
+                train_dataset=train_dataset,
+                val_dataset=val_dataset,
                 checkpoint_dir=str(ckpt_dir),
                 log_dir=str(ckpt_dir.parent / "logs_1b"),
             )

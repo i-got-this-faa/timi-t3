@@ -1,4 +1,5 @@
 """Dataset loading, shard download, pretraining mix builder."""
+
 from __future__ import annotations
 
 import json
@@ -11,29 +12,35 @@ from datasets import load_dataset
 
 from .config import ModelConfig
 
-DATASET_IDS: dict[str, str] = {
-    "dclm": "mlfoundations/dclm-baseline-1.0",
-    "fineweb": "HuggingFaceFW/fineweb-edu",
-    "code": "code-search-net/code_search_net",
-    "math": "EleutherAI/proof-pile-2",
+# Dataset IDs and their configs (None = no config needed)
+DATASET_SPECS: dict[str, dict] = {
+    "dclm": {"id": "mlfoundations/dclm-baseline-1.0", "config": None},
+    "fineweb": {"id": "HuggingFaceFW/fineweb-edu", "config": None},
+    "code": {"id": "code-search-net/code_search_net", "config": "python"},
+    "math_owm": {"id": "aklein4/proof-pile-2-fixed", "config": "open-web-math"},
+    "math_alg": {"id": "aklein4/proof-pile-2-fixed", "config": "algebraic-stack"},
 }
 
 TEXT_FIELDS: dict[str, str] = {
     "mlfoundations/dclm-baseline-1.0": "text",
     "HuggingFaceFW/fineweb-edu": "text",
     "code-search-net/code_search_net": "whole_func_string",
-    "EleutherAI/proof-pile-2": "text",
+    "aklein4/proof-pile-2-fixed": "text",
 }
 
 
 def stream_examples(
-    dataset_id: str, split: str = "train", max_examples: int | None = None,
+    dataset_id: str,
+    split: str = "train",
+    max_examples: int | None = None,
+    config: str | None = None,
 ) -> Iterator[dict]:
     """Stream examples from a HuggingFace dataset. Returns raw dict rows."""
-    if "code_search_net" in dataset_id:
-        ds = load_dataset(dataset_id, "python", split=split, streaming=True, trust_remote_code=True)
+    kwargs = {"split": split, "streaming": True, "trust_remote_code": True}
+    if config:
+        ds = load_dataset(dataset_id, config, **kwargs)
     else:
-        ds = load_dataset(dataset_id, split=split, streaming=True, trust_remote_code=True)
+        ds = load_dataset(dataset_id, **kwargs)
 
     text_field = TEXT_FIELDS.get(dataset_id, "text")
     count = 0
@@ -41,23 +48,25 @@ def stream_examples(
         text = row.get(text_field, "") or ""
         if not text or not isinstance(text, str) or len(text.strip()) < 20:
             continue
-        yield {"text": text, "source": dataset_id}
+        yield {"text": text, "source": f"{dataset_id}/{config}" if config else dataset_id}
         count += 1
         if max_examples is not None and count >= max_examples:
             break
 
 
 def download_shard(
-    dataset_id: str, output_dir: str, max_gb: float, split: str = "train",
+    dataset_id: str,
+    output_dir: str,
+    max_gb: float,
+    split: str = "train",
+    config: str | None = None,
 ) -> Path:
-    """Download a fixed-size subset from a HF dataset, save as jsonl shards.
-
-    Returns shard directory path.
-    """
+    """Download a fixed-size subset from a HF dataset, save as jsonl shards."""
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    shard_path = out / f"{dataset_id.replace('/', '_')}.jsonl"
+    label = f"{dataset_id}/{config}" if config else dataset_id
+    shard_path = out / f"{label.replace('/', '_')}.jsonl"
     if shard_path.exists():
         print(f"  Shard already exists: {shard_path}")
         return out
@@ -67,7 +76,7 @@ def download_shard(
     written = 0
 
     with open(shard_path, "w", encoding="utf-8") as f:
-        for row in stream_examples(dataset_id, split=split):
+        for row in stream_examples(dataset_id, split=split, config=config):
             line = json.dumps(row, ensure_ascii=False) + "\n"
             f.write(line)
             bytes_written += len(line.encode("utf-8"))
@@ -81,7 +90,8 @@ def download_shard(
 
 
 def build_pretraining_mix(
-    data_dir: str, config: ModelConfig,
+    data_dir: str,
+    model_config: ModelConfig,
 ) -> tuple[Path, Path]:
     """Download all pretraining sources per plan.md §5.1 caps.
 
@@ -94,12 +104,17 @@ def build_pretraining_mix(
     train_dir.mkdir(parents=True, exist_ok=True)
     val_dir.mkdir(parents=True, exist_ok=True)
 
-    for name, dataset_id in DATASET_IDS.items():
-        cap_gb = config.data_caps_gb.get(dataset_id, 1.0)
+    for name, spec in DATASET_SPECS.items():
+        dataset_id = spec["id"]
+        ds_config = spec["config"]
+        cap_gb = model_config.data_caps_gb.get(name, model_config.data_caps_gb.get(dataset_id, 1.0))
+        # Split math cap between owm and algstack
+        if name.startswith("math_"):
+            cap_gb = model_config.data_caps_gb.get("math", 1.0) / 2
         split_cap = cap_gb * 0.9
-        print(f"Downloading {name} ({dataset_id}) - cap {cap_gb:.1f} GB")
-        download_shard(dataset_id, str(train_dir), split_cap, split="train")
-
+        label = f"{name} ({dataset_id}/{ds_config})" if ds_config else f"{name} ({dataset_id})"
+        print(f"Downloading {label} - cap {cap_gb:.1f} GB")
+        download_shard(dataset_id, str(train_dir), split_cap, split="train", config=ds_config)
     # Carve val: every 10th document from train shards
     for shard_file in sorted(train_dir.glob("*.jsonl")):
         val_file = val_dir / shard_file.name
@@ -115,8 +130,9 @@ def build_pretraining_mix(
             f.writelines(train_lines)
         with open(val_file, "w", encoding="utf-8") as f:
             f.writelines(val_lines)
-        print(f"  Carved {len(val_lines)} val lines from {shard_file.name} "
-              f"({len(train_lines)} train)")
+        print(
+            f"  Carved {len(val_lines)} val lines from {shard_file.name} ({len(train_lines)} train)"
+        )
 
     return train_dir, val_dir
 
@@ -161,8 +177,8 @@ class PretrainingDataset(torch.utils.data.IterableDataset):
                     ids = encoded.ids if hasattr(encoded, "ids") else list(encoded)
                     buffer.extend(ids)
                     while len(buffer) >= self.seq_len:
-                        chunk = buffer[:self.seq_len]
-                        buffer = buffer[self.seq_len:]
+                        chunk = buffer[: self.seq_len]
+                        buffer = buffer[self.seq_len :]
                         yield torch.tensor(chunk, dtype=torch.long)
         if len(buffer) >= self.seq_len // 2:
             padded = buffer + [0] * (self.seq_len - len(buffer))

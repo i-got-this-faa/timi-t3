@@ -1,4 +1,5 @@
 """P6 gate: train dense-100m control baseline."""
+
 import sys
 from pathlib import Path
 
@@ -22,20 +23,24 @@ def main():
     print(f"Device: {device}")
 
     config = ModelConfig.preset_dense_100m()
-    print(f"Dense control: {config.n_layers} layers, d={config.d_model}, "
-          f"KDA={config.use_kda}, MoE={config.use_moe}")
+    print(
+        f"Dense control: {config.n_layers} layers, d={config.d_model}, "
+        f"KDA={config.use_kda}, MoE={config.use_moe}"
+    )
 
     model = KDAMoEModel(config).to(device)
     total, _ = model.get_num_params()
-    print(f"Model: {total/1e6:.1f}M params")
+    print(f"Model: {total / 1e6:.1f}M params")
 
     # Load data if available
-    data_dir = Path("data")
+    data_dir = Path("artifacts/data")
     train_dir = data_dir / "shards"
     if list(train_dir.glob("*.jsonl")):
         tokenizer = load_tokenizer("artifacts/tokenizer/tokenizer.json")
         train_dataset = PretrainingDataset(
-            str(train_dir), tokenizer, seq_len=config.curriculum_start_seq,
+            str(train_dir),
+            tokenizer,
+            seq_len=config.curriculum_start_seq,
         )
     else:
         print("No shards found — using synthetic data")
@@ -50,8 +55,10 @@ def main():
     )
 
     stats = trainer.train()
-    print(f"\nDense control complete: loss={stats['final_loss']:.4f}, "
-          f"tok/s={stats['tok_per_sec']:.0f}")
+    print(
+        f"\nDense control complete: loss={stats['final_loss']:.4f}, "
+        f"tok/s={stats['tok_per_sec']:.0f}"
+    )
 
 
 if __name__ == "__main__":

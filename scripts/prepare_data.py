@@ -1,4 +1,5 @@
 """P1 gate: one-shot data prep - download shards, train tokenizer, fertility check."""
+
 import sys
 from pathlib import Path
 
@@ -17,7 +18,7 @@ def main():
     config = ModelConfig.preset_450m()
 
     print("\n[1/3] Building pretraining mix...")
-    train_dir, val_dir = build_pretraining_mix("data", config)
+    train_dir, val_dir = build_pretraining_mix("artifacts/data", config)
     print(f"  Train: {train_dir}")
     print(f"  Val:   {val_dir}")
 

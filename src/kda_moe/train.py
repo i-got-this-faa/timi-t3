@@ -1,7 +1,9 @@
 """Training loop with curriculum, checkpointing, monitoring, resume support."""
+
 from __future__ import annotations
 
 from .compat import apply_triton_patch
+
 apply_triton_patch()
 
 import time
@@ -31,8 +33,11 @@ def save_checkpoint(
     if full and optimizer is not None:
         full_path = out.parent / f"{out.stem}_full.pt"
         torch.save(
-            {"step": step, "model_state": model.state_dict(),
-             "optimizer_state": optimizer.state_dict()},
+            {
+                "step": step,
+                "model_state": model.state_dict(),
+                "optimizer_state": optimizer.state_dict(),
+            },
             str(full_path),
         )
 
@@ -127,14 +132,19 @@ class Trainer:
         cfg = self.config
         try:
             import bitsandbytes as bnb
+
             self.optimizer: torch.optim.Optimizer = bnb.optim.AdamW8bit(
-                self.model.parameters(), lr=cfg.lr, betas=cfg.betas,
+                self.model.parameters(),
+                lr=cfg.lr,
+                betas=cfg.betas,
                 weight_decay=cfg.weight_decay,
             )
             self.use_8bit = True
         except ImportError:
             self.optimizer = torch.optim.AdamW(
-                self.model.parameters(), lr=cfg.lr, betas=cfg.betas,
+                self.model.parameters(),
+                lr=cfg.lr,
+                betas=cfg.betas,
                 weight_decay=cfg.weight_decay,
             )
             self.use_8bit = False
@@ -188,12 +198,24 @@ class Trainer:
         model.train()
 
         total, _ = model.get_num_params()
-        print(f"Training: {cfg.total_steps} steps, device={self.device}, "
-              f"8bit={self.use_8bit}, seq={cfg.curriculum_start_seq}, "
-              f"model={total/1e6:.1f}M params")
+        print(
+            f"Training: {cfg.total_steps} steps, device={self.device}, "
+            f"8bit={self.use_8bit}, seq={cfg.curriculum_start_seq}, "
+            f"model={total / 1e6:.1f}M params"
+        )
 
         train_iter = iter(self.train_dataset) if self.train_dataset else None
         losses: list[float] = []
+
+        from tqdm import tqdm
+
+        pbar = tqdm(
+            total=cfg.total_steps,
+            initial=self.step,
+            desc="training",
+            unit="step",
+            dynamic_ncols=True,
+        )
 
         while self.step < cfg.total_steps:
             self._update_curriculum()
@@ -203,10 +225,12 @@ class Trainer:
             accum_loss = 0.0
             self.optimizer.zero_grad()
 
+            step_t0 = time.time()
             for _ in range(cfg.grad_accum_steps):
                 if train_iter is None:
                     input_ids = torch.randint(
-                        0, cfg.vocab_size,
+                        0,
+                        cfg.vocab_size,
                         (cfg.micro_batch_size, self.current_seq_len),
                         device=self.device,
                     )
@@ -240,13 +264,24 @@ class Trainer:
             tokens = cfg.micro_batch_size * self.current_seq_len * cfg.grad_accum_steps
             self.tokens_processed += tokens
 
+            step_s = time.time() - step_t0
+            pbar.set_postfix(
+                {
+                    "loss": f"{accum_loss:.3f}",
+                    "lr": f"{lr:.1e}",
+                    "s/step": f"{step_s:.1f}",
+                    "seq": self.current_seq_len,
+                }
+            )
+            pbar.update(1)
+
             if self.step % cfg.log_interval == 0:
                 elapsed = max(time.time() - self.start_time, 0.001)
                 tok_per_sec = self.tokens_processed / elapsed
-                grad_norm = sum(
-                    p.grad.norm().item() ** 2
-                    for p in model.parameters() if p.grad is not None
-                ) ** 0.5
+                grad_norm = (
+                    sum(p.grad.norm().item() ** 2 for p in model.parameters() if p.grad is not None)
+                    ** 0.5
+                )
 
                 self.writer.add_scalar("train/loss", accum_loss, self.step)
                 self.writer.add_scalar("train/lr", lr, self.step)
@@ -258,17 +293,23 @@ class Trainer:
                 for k, v in rs.items():
                     self.writer.add_scalar(f"router/{k}", v, self.step)
 
-                vram = (torch.cuda.max_memory_allocated(self.device) / 1e9
-                        if self.device.type == "cuda" else 0)
-                print(f"step {self.step:5d}/{cfg.total_steps} | "
-                      f"loss {accum_loss:.4f} | lr {lr:.2e} | "
-                      f"seq {self.current_seq_len} | tok/s {tok_per_sec:.0f} | "
-                      f"vram {vram:.1f}GB")
+                vram = (
+                    torch.cuda.max_memory_allocated(self.device) / 1e9
+                    if self.device.type == "cuda"
+                    else 0
+                )
+                print(
+                    f"         avg | seq {self.current_seq_len} | "
+                    f"tok/s {tok_per_sec:.0f} | vram {vram:.1f}GB",
+                    flush=True,
+                )
                 losses.append(accum_loss)
 
             if self.step % cfg.checkpoint_interval == 0:
                 save_checkpoint(
-                    model, self.optimizer, self.step,
+                    model,
+                    self.optimizer,
+                    self.step,
                     str(self.checkpoint_dir / f"step_{self.step}.pt"),
                     full=(self.step % cfg.full_checkpoint_interval == 0),
                 )
@@ -284,8 +325,11 @@ class Trainer:
 
         # Final checkpoint
         save_checkpoint(
-            model, self.optimizer, self.step,
-            str(self.checkpoint_dir / f"step_{self.step}.pt"), full=True,
+            model,
+            self.optimizer,
+            self.step,
+            str(self.checkpoint_dir / f"step_{self.step}.pt"),
+            full=True,
         )
 
         self.writer.close()

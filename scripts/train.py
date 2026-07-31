@@ -63,6 +63,7 @@ class SFTTrainer(Trainer):
 
         print(f"SFT: {n} examples, {cfg.total_steps} steps")
         accum_loss = 0.0
+        tokens_processed = 0
         step = 0
         for step in range(cfg.total_steps):
             lr = self._get_lr(step)
@@ -99,13 +100,17 @@ class SFTTrainer(Trainer):
                 model.accumulate_router_bias()
                 loss.backward()
                 accum_loss += loss.item()
+                tokens_processed += inputs.shape[1]
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.clip_grad_norm)
             self.optimizer.step()
             model.apply_router_bias()
 
             if step % cfg.log_interval == 0:
-                print(f"step {step:5d}/{cfg.total_steps} | loss {accum_loss:.4f} | lr {lr:.2e}")
+                print(
+                    f"step {step:5d}/{cfg.total_steps} | tokens {tokens_processed/1e6:7.1f}M | "
+                    f"loss {accum_loss:.4f} | lr {lr:.2e}"
+                )
 
             if step % cfg.checkpoint_interval == 0 and step > 0:
                 save_checkpoint(
@@ -115,12 +120,14 @@ class SFTTrainer(Trainer):
                     str(self.checkpoint_dir / f"step_{step}.pt"),
                     full=(step % cfg.full_checkpoint_interval == 0),
                     ema=self.ema,
+                    tokens=tokens_processed,
+                    start_time=self.start_time,
                 )
 
         return {
             "final_loss": accum_loss,
             "total_steps": step + 1,
-            "tokens_processed": 0,
+            "tokens_processed": tokens_processed,
             "tok_per_sec": 0,
         }
 
@@ -224,8 +231,10 @@ def run_pretrain(config: ModelConfig, args) -> None:
             )
             sys.exit(1)
 
+    tok = stats["tokens_processed"]
+    tok_s = f"{tok/1e9:.2f}B" if tok >= 1e9 else f"{tok/1e6:.1f}M"
     print(
-        f"\nTraining complete: {stats['total_steps']} steps, "
+        f"\nTraining complete: {stats['total_steps']} steps, {tok_s} tokens seen, "
         f"final_loss={stats['final_loss']:.4f}, tok/s={stats['tok_per_sec']:.0f}"
     )
 

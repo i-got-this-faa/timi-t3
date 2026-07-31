@@ -18,6 +18,9 @@ from .config import ModelConfig
 from .model import KDAMoEModel
 from .optim import EMA, Lion, Muon
 
+# Full corpus size (tokens) across all data sources — used to report epochs.
+DATASET_TOKENS = 2_500_000_000
+
 
 def save_checkpoint(
     model: nn.Module,
@@ -26,11 +29,14 @@ def save_checkpoint(
     path: str,
     full: bool = False,
     ema: EMA | None = None,
+    tokens: int = 0,
+    start_time: float | None = None,
 ) -> None:
-    """Save model state_dict. Optionally save optimizer/EMA state."""
+    """Save model state + training stats so resumed runs report accurate totals."""
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(model.state_dict(), str(out.with_suffix(".pt")))
+    meta = {"step": step, "tokens": tokens, "start_time": start_time}
+    torch.save({"model_state": model.state_dict(), "meta": meta}, str(out.with_suffix(".pt")))
 
     if full and optimizer is not None:
         full_path = out.parent / f"{out.stem}_full.pt"
@@ -40,6 +46,7 @@ def save_checkpoint(
                 "model_state": model.state_dict(),
                 "optimizer_state": optimizer.state_dict(),
                 "ema_state": ema.state_dict() if ema is not None else None,
+                "meta": meta,
             },
             str(full_path),
         )
@@ -53,8 +60,11 @@ def load_checkpoint(
     path: str,
     device: torch.device | None = None,
     ema: EMA | None = None,
-) -> int:
-    """Load model + optimizer (and EMA) state. Return step number."""
+) -> dict[str, Any]:
+    """Load model + optimizer (and EMA) state and training stats.
+
+    Returns {"step", "tokens", "start_time"} for the run.
+    """
     p = Path(path)
     for ext in ("", ".pt", ".safetensors"):
         candidate = p.with_suffix(ext) if ext else p
@@ -65,15 +75,20 @@ def load_checkpoint(
         raise FileNotFoundError(f"Checkpoint not found: {path}")
 
     ckpt = torch.load(str(p), map_location=device or "cpu", weights_only=False)
+    meta = ckpt.get("meta", {}) if isinstance(ckpt, dict) else {}
     if isinstance(ckpt, dict) and "model_state" in ckpt:
         model.load_state_dict(ckpt["model_state"], strict=False)
         if optimizer is not None and "optimizer_state" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer_state"])
         if ema is not None and ckpt.get("ema_state") is not None:
             ema.load_state_dict(ckpt["ema_state"])
-        return ckpt.get("step", 0)
+        return {
+            "step": ckpt.get("step", meta.get("step", 0)),
+            "tokens": meta.get("tokens", 0),
+            "start_time": meta.get("start_time"),
+        }
     model.load_state_dict(ckpt, strict=False)
-    return 0
+    return {"step": 0, "tokens": 0, "start_time": None}
 
 
 def _find_latest_checkpoint(checkpoint_dir: str) -> tuple[int, str] | None:
@@ -128,11 +143,11 @@ class Trainer:
 
         self._setup_optimizer()
         self.ema = EMA(self.model, self.config.ema_decay) if self.config.ema else None
+        self.tokens_processed = 0
+        self.start_time = time.time()
         self._try_resume()
 
         self.scaler = torch.amp.GradScaler("cuda", enabled=False)  # bf16 doesn't need it
-        self.tokens_processed = 0
-        self.start_time = time.time()
         self.router_entropy_history: list[float] = []
         self._set_precision_flags()
 
@@ -185,7 +200,14 @@ class Trainer:
                 flush=True,
             )
             return
-        self.step = max(resume_step, loaded)
+        self.step = max(resume_step, loaded["step"])
+        self.tokens_processed = loaded["tokens"]
+        if loaded["start_time"]:
+            self.start_time = loaded["start_time"]
+        print(
+            f"  resuming with {loaded['tokens'] / 1e6:.1f}M tokens already seen",
+            flush=True,
+        )
         for ms, sl in self.config.curriculum_milestones:
             if self.step >= ms:
                 self.current_seq_len = sl
@@ -250,6 +272,22 @@ class Trainer:
                 stats[f"kda_decay_mean_{i}"] = ld.mean().item()
 
         return stats
+
+    def _collect_expert_grid(self) -> tuple[list[float], list[bool]]:
+        """Aggregate per-expert load + activeness across all MoE layers (last micro-batch)."""
+        n_experts = self.config.n_experts
+        counts = torch.zeros(n_experts)
+        for layer in self.model.layers:
+            ffn = getattr(layer, "ffn", None)
+            idx = getattr(ffn, "last_expert_idx", None)
+            if idx is not None and idx.numel() > 0:
+                counts += torch.bincount(idx.flatten().cpu(), minlength=n_experts)
+        total = counts.sum()
+        if total == 0:
+            return [], []
+        load = (counts / total).tolist()
+        active = counts.gt(0).tolist()
+        return load, active
 
     def train(self) -> dict[str, Any]:
         cfg = self.config
@@ -348,6 +386,7 @@ class Trainer:
             )
 
             rs = self._collect_router_stats()
+            expert_load, expert_active = self._collect_expert_grid()
             dead = sum(v for k, v in rs.items() if k.startswith("dead_"))
             active = cfg.n_experts - dead
 
@@ -363,7 +402,7 @@ class Trainer:
                 if self.device.type == "cuda"
                 else 0
             )
-            epoch = self.tokens_processed / 2.5e9
+            epoch = self.tokens_processed / DATASET_TOKENS
 
             display.update(
                 step=self.step,
@@ -373,11 +412,14 @@ class Trainer:
                 tok_per_sec=tok_per_sec,
                 step_time=step_time,
                 seq_len=self.current_seq_len,
+                tokens=self.tokens_processed,
                 vram_used=vram_used,
                 vram_peak=vram_peak,
                 active_experts=active,
                 total_experts=cfg.n_experts,
                 router_entropy=avg_entropy,
+                expert_load=expert_load,
+                expert_active=expert_active,
                 epoch=epoch,
             )
 
@@ -386,6 +428,8 @@ class Trainer:
                 self.writer.add_scalar("train/lr", lr, self.step)
                 self.writer.add_scalar("train/grad_norm", grad_norm, self.step)
                 self.writer.add_scalar("train/tok_per_sec", tok_per_sec, self.step)
+                self.writer.add_scalar("train/tokens", self.tokens_processed, self.step)
+                self.writer.add_scalar("train/epoch", epoch, self.step)
                 for k, v in rs.items():
                     self.writer.add_scalar(f"router/{k}", v, self.step)
                 losses.append(accum_loss)
@@ -399,6 +443,8 @@ class Trainer:
                     str(self.checkpoint_dir / f"step_{self.step}.pt"),
                     full=(self.step % cfg.full_checkpoint_interval == 0),
                     ema=self.ema,
+                    tokens=self.tokens_processed,
+                    start_time=self.start_time,
                 )
 
             if not torch.isfinite(torch.tensor(accum_loss)):
@@ -411,6 +457,8 @@ class Trainer:
             str(self.checkpoint_dir / f"step_{self.step}.pt"),
             full=True,
             ema=self.ema,
+            tokens=self.tokens_processed,
+            start_time=self.start_time,
         )
         self.writer.close()
 

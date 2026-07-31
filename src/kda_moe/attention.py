@@ -84,7 +84,7 @@ class KDAAttention(nn.Module):
         # Output projection
         self.W_o = nn.Linear(inner_dim, d_model, bias=False)
         self.norm = RMSNorm(d_model, eps=eps)
-        self.register_buffer("last_log_decay", torch.zeros(0))
+        self.register_buffer("last_log_decay", torch.zeros(0), persistent=False)
 
         self.reset_parameters()
 

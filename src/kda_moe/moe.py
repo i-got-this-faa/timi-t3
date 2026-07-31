@@ -80,7 +80,7 @@ class LatentMoE(nn.Module):
         self.top_k = top_k
         self.half_h = expert_hidden // 2
         self.z_loss_coeff = z_loss_coeff
-        self.register_buffer("last_router_logits", torch.zeros(0))
+        self.register_buffer("last_router_logits", torch.zeros(0), persistent=False)
         self.last_z_loss: Tensor | None = None
 
         self.down_proj = nn.Linear(d_model, latent_dim, bias=False)

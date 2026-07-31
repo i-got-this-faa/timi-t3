@@ -1,4 +1,4 @@
-"""P1-light: download ~200 MB of non-gated data, train tokenizer, fertility check."""
+"""P1-light: download ~1 GB of language-heavy non-gated data, train tokenizer, fertility check."""
 
 import argparse
 import sys
@@ -33,20 +33,22 @@ def main():
 
     try:
         print("=" * 60)
-        print("P1-small: Data pipeline + tokenizer (~200 MB)")
+        print("P1-small: Data pipeline + tokenizer (~1 GB language-heavy)")
         print("=" * 60)
 
-        # Tiny data caps per dataset — build_pretraining_mix handles math/code splitting
+        # ~1 GB total, deliberately language-heavy: 92% natural language
+        # (dclm + fineweb-edu + tinystories), 5% math, 3% code. Code is
+        # minimized so the smoke runs learn language rather than syntax.
         if args.config:
             config = ModelConfig.from_toml(args.config)
         else:
             config = ModelConfig.preset_80m()
             config.data_caps_gb = {
-                "dclm": 0.05,
-                "fineweb": 0.04,
-                "code": 0.04,
+                "dclm": 0.45,
+                "fineweb": 0.35,
                 "math": 0.05,
-                "tinystories": 0.03,
+                "tinystories": 0.12,
+                "code": 0.03,
             }
             # data_mix weights proportional to caps
             config.data_mix = {k: v / sum(config.data_caps_gb.values()) for k, v in config.data_caps_gb.items()}

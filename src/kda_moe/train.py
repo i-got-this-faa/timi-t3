@@ -127,13 +127,13 @@ class Trainer:
         self.current_seq_len = config.curriculum_start_seq
 
         self._setup_optimizer()
+        self.ema = EMA(self.model, self.config.ema_decay) if self.config.ema else None
         self._try_resume()
 
         self.scaler = torch.amp.GradScaler("cuda", enabled=False)  # bf16 doesn't need it
         self.tokens_processed = 0
         self.start_time = time.time()
         self.router_entropy_history: list[float] = []
-        self.ema = EMA(self.model, self.config.ema_decay) if self.config.ema else None
         self._set_precision_flags()
 
     def _set_precision_flags(self):
@@ -174,9 +174,17 @@ class Trainer:
             return
         resume_step, ckpt_path = latest
         print(f"Resuming from step {resume_step}: {ckpt_path}")
-        loaded = load_checkpoint(
-            self.model, self.optimizer, ckpt_path, device=self.device, ema=self.ema
-        )
+        try:
+            loaded = load_checkpoint(
+                self.model, self.optimizer, ckpt_path, device=self.device, ema=self.ema
+            )
+        except (RuntimeError, ValueError) as exc:
+            print(
+                f"  checkpoint incompatible with this config ({exc.__class__.__name__}); "
+                "starting fresh",
+                flush=True,
+            )
+            return
         self.step = max(resume_step, loaded)
         for ms, sl in self.config.curriculum_milestones:
             if self.step >= ms:

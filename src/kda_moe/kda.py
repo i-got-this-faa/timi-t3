@@ -258,6 +258,9 @@ def kda_fla(
     except ImportError:
         raise ImportError("FLA not available — use chunked PyTorch path")
 
+    if not q.is_cuda:
+        raise ImportError("FLA kernels require CUDA — use chunked PyTorch path")
+
     out = fused_recurrent_kda(
         q.transpose(1, 2).contiguous(),
         k.transpose(1, 2).contiguous(),

@@ -13,7 +13,7 @@ use_kda = true
 kda_kernel_size = 4
 kda_chunk_size = 64
 kda_g_min = -5.0
-kda_use_fla = false
+kda_use_fla = true
 
 [moe]
 use_moe = true

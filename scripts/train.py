@@ -19,6 +19,7 @@ import os
 import sys
 from dataclasses import replace
 from pathlib import Path
+from typing import get_type_hints
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -288,6 +289,42 @@ def find_latest_ckpt(ckpt_dir: str) -> str | None:
     return str(pts[0]) if pts else None
 
 
+def _coerce(field_type, raw: str):
+    """Coerce a CLI string to the config field's type (int/float/bool/tuple/list)."""
+    if field_type is bool:
+        return raw.strip().lower() in ("1", "true", "yes")
+    if field_type is int:
+        return int(raw)
+    if field_type is float:
+        return float(raw)
+    origin = getattr(field_type, "__origin__", None)
+    args = getattr(field_type, "__args__", ())
+    if origin in (tuple, list):
+        items = [x.strip() for x in raw.split(",") if x.strip()]
+        inner = args[0] if args else str
+        return tuple(_coerce(inner, x) for x in items) if origin is tuple else [
+            _coerce(inner, x) for x in items
+        ]
+    return raw  # str and anything else pass through
+
+
+def apply_overrides(config: ModelConfig, overrides: list[str]) -> list[str]:
+    """Set config fields from 'KEY=VALUE' strings. Returns the keys applied."""
+    types = get_type_hints(ModelConfig)
+    applied = []
+    for kv in overrides:
+        key, sep, val = kv.partition("=")
+        if not sep:
+            raise SystemExit(f"--set expects KEY=VALUE, got: {kv!r}")
+        if key not in types:
+            raise SystemExit(f"Unknown config field: {key!r}")
+        setattr(config, key, _coerce(types[key], val))
+        applied.append(key)
+    if "seq_len" in applied and "curriculum_start_seq" not in applied:
+        config.curriculum_start_seq = config.seq_len
+    return applied
+
+
 def main():
     parser = argparse.ArgumentParser(description="Unified KDA-MoE training")
     parser.add_argument(
@@ -302,6 +339,13 @@ def main():
     parser.add_argument("--ckpt-dir", default=None, help="default: artifacts/checkpoints/<config stem>")
     parser.add_argument("--log-dir", default=None, help="default: artifacts/logs/<config stem>")
     parser.add_argument("--steps", type=int, default=None, help="override total_steps")
+    parser.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="override a config field, e.g. --set lr=1e-3 --set seq_len=256 --set use_moe=false (repeatable)",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--cpu", action="store_true", help="force CPU")
     parser.add_argument("--no-gen", action="store_true", help="skip post-training generation check")
@@ -315,8 +359,12 @@ def main():
     torch.manual_seed(args.seed)
 
     config = ModelConfig.from_toml(args.config)
+    applied = apply_overrides(config, args.set)
     if args.steps is not None:
         config.total_steps = args.steps
+        applied.append("total_steps")
+    if applied:
+        print(f"Overrides: {', '.join(f'{k}={getattr(config, k)}' for k in applied)}")
 
     stem = Path(args.config).stem
     args.ckpt_dir = args.ckpt_dir or f"artifacts/checkpoints/{stem}"

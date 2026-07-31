@@ -18,10 +18,10 @@ kda_use_fla = true
 
 [moe]
 use_moe = true
-n_experts = 16
+n_experts = 32
 top_k = 2
 latent_dim = 128
-expert_hidden = 1464
+expert_hidden = 732
 shared_expert_hidden = 256
 aux_free_bias_update = 0.001
 z_loss_coeff = 0.0001

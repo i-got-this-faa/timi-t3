@@ -22,6 +22,7 @@ class SigmoidRouter(nn.Module):
         self.aux_free_bias_update = aux_free_bias_update
         self.weight = nn.Parameter(torch.empty(d_model, n_experts))
         self.register_buffer("expert_bias", torch.zeros(n_experts))
+        self.register_buffer("_bias_updates", torch.zeros(n_experts))
         nn.init.normal_(self.weight, std=0.02)
 
     def forward(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
@@ -30,12 +31,24 @@ class SigmoidRouter(nn.Module):
         topk_scores, topk_indices = torch.topk(scores, self.top_k, dim=-1)
         return topk_indices, topk_scores, logits
 
-    def update_bias(self, expert_indices: Tensor):
+    def accumulate_bias(self, expert_indices: Tensor):
+        """Accumulate one micro-batch's load-balancing update (deferred to step end)."""
         with torch.no_grad():
             N = expert_indices.numel()
             counts = torch.bincount(expert_indices.flatten(), minlength=self.n_experts).float()
             avg = N / self.n_experts
-            self.expert_bias -= self.aux_free_bias_update * (counts - avg).sign()
+            self._bias_updates += (counts - avg).sign()
+
+    def apply_bias(self):
+        """Apply accumulated updates to expert_bias; called once per optimizer step.
+
+        expert_bias must stay constant across a step so that gradient-checkpoint
+        recompute reproduces the same router decisions (in-place/step-end updates
+        would otherwise produce different token->expert grouping on recompute).
+        """
+        with torch.no_grad():
+            self.expert_bias -= self.aux_free_bias_update * self._bias_updates
+            self._bias_updates.zero_()
 
     def router_entropy(self, logits: Tensor) -> float:
         """Compute entropy of router probability distribution."""
@@ -145,12 +158,12 @@ class LatentMoE(nn.Module):
         h = self.norm_down(self.down_proj(x)).view(N, self.latent_dim)
         expert_idx, expert_w, router_logits = self.router(h)
         self.last_router_logits = router_logits.detach()
+        self.last_expert_idx = expert_idx.detach()
         self.last_z_loss = (
             (torch.logsumexp(router_logits, dim=-1) ** 2).mean()
             if self.z_loss_coeff
             else None
         )
-        self.router.update_bias(expert_idx)
 
         # Dispatch each top-k slot
         out = torch.zeros(N, self.latent_dim, device=device, dtype=x.dtype)
@@ -164,6 +177,24 @@ class LatentMoE(nn.Module):
         # Shared expert + output
         shared = self.shared_down(F.silu(self.shared_up(h)))
         return self.up_proj(self.norm_out(out + shared).view(B, T, self.latent_dim))
+
+    def accumulate_bias(self) -> None:
+        """Record the last micro-batch's load for the aux-free bias update.
+
+        Called by the training loop after each micro-batch forward, outside the
+        gradient-checkpointed region. The actual bias change is deferred to
+        `apply_bias` at optimizer-step end so the checkpointed forward always
+        sees a constant expert_bias (recompute-safe).
+        """
+        if not self.training or self.last_expert_idx is None:
+            return
+        if self.last_expert_idx.numel() == 0:
+            return
+        self.router.accumulate_bias(self.last_expert_idx)
+
+    def apply_bias(self) -> None:
+        """Apply the accumulated aux-free bias update (once per optimizer step)."""
+        self.router.apply_bias()
 
 
 class RMSNorm(nn.Module):

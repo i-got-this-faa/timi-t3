@@ -1,4 +1,4 @@
-# Dense 100M control — vanilla 16-layer GQA+NoPE (plan.md §2.3)
+# 100M KDA-MoE model (was the dense control; all models now use KDA + MoE)
 
 [architecture]
 n_layers = 16
@@ -10,17 +10,17 @@ vocab_size = 32000
 ffn_multiplier = 3.0
 
 [kda]
-use_kda = false
+use_kda = true
 
 [moe]
-use_moe = false
-n_experts = 0
-top_k = 0
-latent_dim = 512
-expert_hidden = 2048
-shared_expert_hidden = 2048
+use_moe = true
+n_experts = 32
+top_k = 2
+latent_dim = 256
+expert_hidden = 216
+shared_expert_hidden = 512
 
-global_attn_layers = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+global_attn_layers = [3, 7, 11, 15]
 
 [training]
 seq_len = 2048

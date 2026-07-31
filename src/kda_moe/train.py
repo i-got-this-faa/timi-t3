@@ -324,11 +324,13 @@ class Trainer:
                     loss = model.loss_fn(logits, targets, ignore_index=-100)
                     loss = loss / cfg.grad_accum_steps
 
+                model.accumulate_router_bias()
                 loss.backward()
                 accum_loss += loss.item()
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.clip_grad_norm)
             self.optimizer.step()
+            model.apply_router_bias()
 
             if self.ema is not None:
                 self.ema.update(model)

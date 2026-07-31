@@ -229,6 +229,26 @@ class KDAMoEModel(nn.Module):
                 loss = loss + ffn.z_loss_coeff * z_loss
         return loss
 
+    def accumulate_router_bias(self) -> None:
+        """Accumulate this micro-batch's load for the aux-free bias update.
+
+        Call after each micro-batch forward, outside the gradient-checkpointed
+        region. No-op in eval mode.
+        """
+        if not self.training:
+            return
+        for layer in self.layers:
+            ffn = getattr(layer, "ffn", None)
+            if isinstance(ffn, LatentMoE):
+                ffn.accumulate_bias()
+
+    def apply_router_bias(self) -> None:
+        """Apply accumulated aux-free bias updates; call once per optimizer step."""
+        for layer in self.layers:
+            ffn = getattr(layer, "ffn", None)
+            if isinstance(ffn, LatentMoE):
+                ffn.apply_bias()
+
     def get_num_params(self) -> tuple[int, int]:
         total = sum(p.numel() for p in self.parameters())
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)

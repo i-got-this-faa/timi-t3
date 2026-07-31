@@ -21,9 +21,19 @@ def main():
         default=None,
         help="Path to TOML config (defaults to preset_80m + small data caps)",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Delete existing artifacts/data_small shards before downloading (re-apply new caps)",
+    )
     args = parser.parse_args()
 
     import kda_moe.data as data_mod
+    import shutil
+
+    if args.force:
+        print("  --force: removing existing artifacts/data_small ...")
+        shutil.rmtree("artifacts/data_small", ignore_errors=True)
 
     # Filter out gated datasets before build_pretraining_mix iterates them
     original_specs = dict(data_mod.DATASET_SPECS)
@@ -33,7 +43,7 @@ def main():
 
     try:
         print("=" * 60)
-        print("P1-small: Data pipeline + tokenizer (~1 GB language-heavy)")
+        print("P1-small: Data pipeline + tokenizer")
         print("=" * 60)
 
         # ~1 GB total, deliberately language-heavy: 92% natural language
@@ -44,11 +54,11 @@ def main():
         else:
             config = ModelConfig.preset_80m()
             config.data_caps_gb = {
-                "dclm": 0.45,
-                "fineweb": 0.35,
-                "math": 0.05,
-                "tinystories": 0.12,
-                "code": 0.03,
+                "dclm": 3.0,
+                "fineweb": 2.0,
+                "math": 0.50,
+                "tinystories": 0.50,
+                "code": 0.10,
             }
             # data_mix weights proportional to caps
             config.data_mix = {k: v / sum(config.data_caps_gb.values()) for k, v in config.data_caps_gb.items()}

@@ -248,7 +248,19 @@ class ModelConfig:
         for k in unknown:
             warnings.warn(f"Unknown config key '{k}' in {path}; ignoring", stacklevel=2)
 
-        return cls(**{k: v for k, v in merged.items() if k in cls.__dataclass_fields__})
+        cfg = cls(**{k: v for k, v in merged.items() if k in cls.__dataclass_fields__})
+
+        # Every model is KDA + MoE: at least one KDA layer, >= 32 experts,
+        # and >= 2 active experts.
+        n_global = len(cfg.global_attn_layers)
+        if cfg.use_kda and n_global >= cfg.n_layers:
+            raise ValueError(f"{path}: use_kda requires at least one KDA layer "
+                             f"(global_attn_layers covers all {cfg.n_layers} layers)")
+        if cfg.use_moe and cfg.n_experts < 32:
+            raise ValueError(f"{path}: use_moe requires n_experts >= 32, got {cfg.n_experts}")
+        if cfg.use_moe and cfg.top_k < 2:
+            raise ValueError(f"{path}: use_moe requires top_k >= 2, got {cfg.top_k}")
+        return cfg
 
     def to_toml(self, path: str | Path) -> None:
         """Serialize this config to a TOML file in the standard section layout."""

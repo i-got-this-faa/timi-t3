@@ -96,11 +96,13 @@ class SFTTrainer(Trainer):
                     loss = (loss * mask.reshape(-1)).sum() / mask.sum().clamp(min=1)
                     loss = loss / cfg.grad_accum_steps
 
+                model.accumulate_router_bias()
                 loss.backward()
                 accum_loss += loss.item()
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.clip_grad_norm)
             self.optimizer.step()
+            model.apply_router_bias()
 
             if step % cfg.log_interval == 0:
                 print(f"step {step:5d}/{cfg.total_steps} | loss {accum_loss:.4f} | lr {lr:.2e}")

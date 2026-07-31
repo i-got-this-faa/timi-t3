@@ -284,6 +284,7 @@ class Trainer:
         display = StatusDisplay(cfg.total_steps, gpu_name, vram_total)
         train_iter = iter(self.train_dataset) if self.train_dataset else None
         losses: list[float] = []
+        last_loss = float("nan")
 
         while self.step < cfg.total_steps:
             self._update_curriculum()
@@ -386,6 +387,7 @@ class Trainer:
                 for k, v in rs.items():
                     self.writer.add_scalar(f"router/{k}", v, self.step)
                 losses.append(accum_loss)
+            last_loss = accum_loss
 
             if self.step % cfg.checkpoint_interval == 0 and self.step > 0:
                 save_checkpoint(
@@ -412,7 +414,7 @@ class Trainer:
 
         display.stop()
         return {
-            "final_loss": losses[-1] if losses else float("nan"),
+            "final_loss": losses[-1] if losses else last_loss,
             "total_steps": self.step,
             "tokens_processed": self.tokens_processed,
             "tok_per_sec": self.tokens_processed / max(time.time() - self.start_time, 0.001),

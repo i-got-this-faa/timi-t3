@@ -180,7 +180,7 @@ cat <<EOF
   Next:
     cd ${REPO_DIR}
     python -c "import torch; print(torch.cuda.is_available())"
-    # train:  python scripts/train_colab.py --config configs/kda_moe_1b.toml
+    # train:  python scripts/train.py --config configs/kda_moe_1b.toml --colab
 EOF
 if [ "${CHECK_ONLY}" -eq 0 ]; then
   ok "Ready. Re-run any time after a disconnect — it is idempotent."

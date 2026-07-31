@@ -1,5 +1,7 @@
 """P7: SFT fine-tuning on FABLE.5 traces."""
+import argparse
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -10,7 +12,7 @@ from kda_moe.compat import apply_triton_patch
 
 apply_triton_patch()
 
-from kda_moe.config import ModelConfig
+from kda_moe.config import CONFIG_DIR, ModelConfig
 from kda_moe.fable import fable_pipeline, tokenize_sft_dataset
 from kda_moe.model import KDAMoEModel
 from kda_moe.tokenizer import load_tokenizer
@@ -95,11 +97,19 @@ class SFTTrainer(Trainer):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config",
+        default=str(CONFIG_DIR / "kda_moe_1b.toml"),
+        help="Path to TOML config for the base model",
+    )
+    args = parser.parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
     # Load base model
-    config = ModelConfig.preset_1b()
+    config = ModelConfig.from_toml(args.config)
     base_ckpt = "artifacts/checkpoints_1b/step_10000.pt"
     model = KDAMoEModel(config).to(device)
 
@@ -118,14 +128,16 @@ def main():
     sft_data = tokenize_sft_dataset(traces, tokenizer, max_seq_len=2048)
     print(f"Tokenized: {sft_data['input_ids'].shape[0]} sequences")
 
-    # SFT config
-    sft_config = ModelConfig.preset_1b()
-    sft_config.lr = 1e-5
-    sft_config.total_steps = 1000
-    sft_config.warmup_steps = 50
-    sft_config.grad_accum_steps = 4
-    sft_config.checkpoint_interval = 200
-    sft_config.log_interval = 20
+    # SFT config (model shape from base config; SFT-specific schedule)
+    sft_config = replace(
+        config,
+        lr=1e-5,
+        total_steps=1000,
+        warmup_steps=50,
+        grad_accum_steps=4,
+        checkpoint_interval=200,
+        log_interval=20,
+    )
 
     trainer = SFTTrainer(
         model=model,

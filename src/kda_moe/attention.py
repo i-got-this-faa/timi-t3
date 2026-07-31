@@ -13,12 +13,17 @@ from .kda import ShortConv, compute_kda_params, kda_chunked, kda_recurrent, kda_
 class RMSNorm(nn.Module):
     """Root-Mean-Square Layer Normalization."""
 
-    def __init__(self, dim: int, eps: float = 1e-6):
+    def __init__(self, dim: int, eps: float = 1e-6, fused: bool = False):
         super().__init__()
         self.eps = eps
+        self.fused = fused
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: Tensor) -> Tensor:
+        if self.fused:
+            from .fused import fused_rmsnorm
+
+            return fused_rmsnorm(x, self.weight, self.eps)
         rms = torch.sqrt(torch.mean(x.float() ** 2, dim=-1, keepdim=True) + self.eps)
         return (x.float() / rms * self.weight.float()).to(x.dtype)
 
@@ -42,6 +47,8 @@ class KDAAttention(nn.Module):
         g_min: float = -5.0,
         chunk_size: int = 64,
         use_fla: bool = False,
+        eps: float = 1e-6,
+        std: float = 0.02,
     ):
         super().__init__()
         self.d_model = d_model
@@ -50,6 +57,9 @@ class KDAAttention(nn.Module):
         self.g_min = g_min
         self.chunk_size = chunk_size
         self.use_fla = use_fla
+        self._warned_fla = False
+        self.eps = eps
+        self.std = std
 
         inner_dim = n_heads * head_dim
         decay_inner = d_model // 4
@@ -73,13 +83,13 @@ class KDAAttention(nn.Module):
 
         # Output projection
         self.W_o = nn.Linear(inner_dim, d_model, bias=False)
-        self.norm = RMSNorm(d_model)
+        self.norm = RMSNorm(d_model, eps=eps)
         self.register_buffer("last_log_decay", torch.zeros(0))
 
         self.reset_parameters()
 
     def reset_parameters(self):
-        std = 0.02
+        std = self.std
         for mod in [
             self.W_q,
             self.W_k,
@@ -127,7 +137,13 @@ class KDAAttention(nn.Module):
         if use_recurrent:
             o, _ = kda_recurrent(q, k, v, beta, log_decay, g)
         elif self.use_fla:
-            o = kda_fla(q, k, v, beta, log_decay, g)
+            try:
+                o = kda_fla(q, k, v, beta, log_decay, g)
+            except ImportError:
+                if not self._warned_fla:
+                    print("  FLA not available — KDA falling back to chunked path", flush=True)
+                    self._warned_fla = True
+                o = kda_chunked(q, k, v, beta, log_decay, g, chunk_size=self.chunk_size)
         else:
             o = kda_chunked(q, k, v, beta, log_decay, g, chunk_size=self.chunk_size)
 
@@ -153,6 +169,9 @@ class GlobalGQA(nn.Module):
         n_heads: int = 10,
         n_kv_heads: int = 2,
         head_dim: int = 64,
+        eps: float = 1e-6,
+        use_sdpa: bool = True,
+        std: float = 0.02,
     ):
         super().__init__()
         self.d_model = d_model
@@ -160,6 +179,8 @@ class GlobalGQA(nn.Module):
         self.n_kv_heads = n_kv_heads
         self.head_dim = head_dim
         self.n_groups = n_heads // n_kv_heads
+        self.use_sdpa = use_sdpa
+        self.std = std
 
         inner_dim = n_heads * head_dim
         kv_dim = n_kv_heads * head_dim
@@ -168,7 +189,11 @@ class GlobalGQA(nn.Module):
         self.W_k = nn.Linear(d_model, kv_dim, bias=False)
         self.W_v = nn.Linear(d_model, kv_dim, bias=False)
         self.W_o = nn.Linear(inner_dim, d_model, bias=False)
-        self.norm = RMSNorm(d_model)
+        self.norm = RMSNorm(d_model, eps=eps)
+
+    def reset_parameters(self):
+        for mod in (self.W_q, self.W_k, self.W_v, self.W_o):
+            nn.init.normal_(mod.weight, std=self.std)
 
     def forward(self, x: Tensor) -> Tensor:
         B, T, _ = x.shape
@@ -177,21 +202,31 @@ class GlobalGQA(nn.Module):
         k = self.W_k(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
         v = self.W_v(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
 
-        # Expand KV heads for GQA
-        if self.n_groups > 1:
-            k = k.unsqueeze(2).expand(B, self.n_kv_heads, self.n_groups, T, self.head_dim)
-            k = k.reshape(B, self.n_heads, T, self.head_dim)
-            v = v.unsqueeze(2).expand(B, self.n_kv_heads, self.n_groups, T, self.head_dim)
-            v = v.reshape(B, self.n_heads, T, self.head_dim)
+        if self.use_sdpa:
+            if self.n_groups > 1:
+                k = k.unsqueeze(2).expand(B, self.n_kv_heads, self.n_groups, T, self.head_dim)
+                k = k.reshape(B, self.n_heads, T, self.head_dim)
+                v = v.unsqueeze(2).expand(B, self.n_kv_heads, self.n_groups, T, self.head_dim)
+                v = v.reshape(B, self.n_heads, T, self.head_dim)
+            o = F.scaled_dot_product_attention(
+                q, k, v, is_causal=True
+            )  # (B, H, T, D)
+        else:
+            # Expand KV heads for GQA
+            if self.n_groups > 1:
+                k = k.unsqueeze(2).expand(B, self.n_kv_heads, self.n_groups, T, self.head_dim)
+                k = k.reshape(B, self.n_heads, T, self.head_dim)
+                v = v.unsqueeze(2).expand(B, self.n_kv_heads, self.n_groups, T, self.head_dim)
+                v = v.reshape(B, self.n_heads, T, self.head_dim)
 
-        # Scaled dot-product attention (NoPE, causal)
-        scale = self.head_dim**-0.5
-        attn = torch.matmul(q, k.transpose(-2, -1)) * scale
-        causal = torch.triu(torch.ones(T, T, device=x.device, dtype=attn.dtype), diagonal=1)
-        attn = attn.masked_fill(causal.bool(), float("-inf"))
-        attn_w = F.softmax(attn, dim=-1)
+            # Scaled dot-product attention (NoPE, causal)
+            scale = self.head_dim**-0.5
+            attn = torch.matmul(q, k.transpose(-2, -1)) * scale
+            causal = torch.triu(torch.ones(T, T, device=x.device, dtype=attn.dtype), diagonal=1)
+            attn = attn.masked_fill(causal.bool(), float("-inf"))
+            attn_w = F.softmax(attn, dim=-1)
+            o = torch.matmul(attn_w, v)
 
-        o = torch.matmul(attn_w, v)
         o = o.transpose(1, 2).contiguous().view(B, T, -1)
 
         return self.norm(self.W_o(o))

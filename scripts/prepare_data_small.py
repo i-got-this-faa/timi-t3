@@ -1,5 +1,6 @@
 """P1-light: download ~200 MB of non-gated data, train tokenizer, fertility check."""
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -14,6 +15,14 @@ GATED_IDS = {"bigcode/the-stack-dedup"}
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="Path to TOML config (defaults to preset_80m + small data caps)",
+    )
+    args = parser.parse_args()
+
     import kda_moe.data as data_mod
 
     # Filter out gated datasets before build_pretraining_mix iterates them
@@ -28,23 +37,25 @@ def main():
         print("=" * 60)
 
         # Tiny data caps per dataset — build_pretraining_mix handles math/code splitting
-        config = ModelConfig.preset_80m()
-        config.data_caps_gb = {
-            "dclm": 0.05,
-            "fineweb": 0.04,
-            "code": 0.04,
-            "math": 0.05,
-            "tinystories": 0.03,
-        }
-        # data_mix weights proportional to caps
-        total_cap = sum(config.data_caps_gb.values())
-        config.data_mix = {k: v / total_cap for k, v in config.data_caps_gb.items()}
-        config.total_steps = 100
-        config.warmup_steps = 5
-        config.checkpoint_interval = 50
-        config.log_interval = 5
+        if args.config:
+            config = ModelConfig.from_toml(args.config)
+        else:
+            config = ModelConfig.preset_80m()
+            config.data_caps_gb = {
+                "dclm": 0.05,
+                "fineweb": 0.04,
+                "code": 0.04,
+                "math": 0.05,
+                "tinystories": 0.03,
+            }
+            # data_mix weights proportional to caps
+            config.data_mix = {k: v / sum(config.data_caps_gb.values()) for k, v in config.data_caps_gb.items()}
+            config.total_steps = 100
+            config.warmup_steps = 5
+            config.checkpoint_interval = 50
+            config.log_interval = 5
 
-        print(f"Total cap: ~{total_cap:.2f} GB across {len(config.data_caps_gb)} sources")
+        print(f"Total cap: ~{sum(config.data_caps_gb.values()):.2f} GB across {len(config.data_caps_gb)} sources")
 
         print("\n[1/3] Building pretraining mix...")
         train_dir, val_dir = build_pretraining_mix("artifacts/data_small", config)

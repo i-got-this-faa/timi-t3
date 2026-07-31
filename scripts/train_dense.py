@@ -1,5 +1,6 @@
 """P6 gate: train dense-100m control baseline."""
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from kda_moe.compat import apply_triton_patch
 
 apply_triton_patch()
 
-from kda_moe.config import ModelConfig
+from kda_moe.config import CONFIG_DIR, ModelConfig
 from kda_moe.data import PretrainingDataset
 from kda_moe.model import KDAMoEModel
 from kda_moe.tokenizer import load_tokenizer
@@ -19,10 +20,18 @@ from kda_moe.train import Trainer
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config",
+        default=str(CONFIG_DIR / "dense_100m.toml"),
+        help="Path to TOML config",
+    )
+    args = parser.parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    config = ModelConfig.preset_dense_100m()
+    config = ModelConfig.from_toml(args.config)
     print(
         f"Dense control: {config.n_layers} layers, d={config.d_model}, "
         f"KDA={config.use_kda}, MoE={config.use_moe}"

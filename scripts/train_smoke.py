@@ -1,5 +1,6 @@
 """P4 gate: smoke training on 450M config — train, checkpoint, generate."""
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -7,17 +8,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import torch
 
-from kda_moe.config import ModelConfig
+from kda_moe.config import CONFIG_DIR, ModelConfig
 from kda_moe.model import KDAMoEModel
 from kda_moe.train import Trainer, load_checkpoint
 from kda_moe.eval import generate
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config",
+        default=str(CONFIG_DIR / "kda_moe_180m.toml"),
+        help="Path to TOML config",
+    )
+    args = parser.parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    config = ModelConfig.preset_180m()
+    config = ModelConfig.from_toml(args.config)
     print(
         f"Config: {config.n_layers} layers, d={config.d_model}, "
         f"E={config.n_experts}, k={config.top_k}, seq={config.seq_len}"

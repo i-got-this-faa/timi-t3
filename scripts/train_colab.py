@@ -5,6 +5,7 @@ Usage (Colab):
     !python scripts/train_colab.py
 """
 
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -17,7 +18,7 @@ from kda_moe.compat import apply_triton_patch
 
 apply_triton_patch()
 
-from kda_moe.config import ModelConfig
+from kda_moe.config import CONFIG_DIR, ModelConfig
 from kda_moe.data import PretrainingDataset, build_pretraining_mix
 from kda_moe.model import KDAMoEModel
 from kda_moe.tokenizer import load_tokenizer
@@ -25,6 +26,14 @@ from kda_moe.train import Trainer
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config",
+        default=str(CONFIG_DIR / "kda_moe_1b.toml"),
+        help="Path to TOML config",
+    )
+    args = parser.parse_args()
+
     # Environment
     repo_dir = Path(os.environ.get("REPO_DIR", Path(__file__).resolve().parent.parent))
     ckpt_dir = Path(os.environ.get("CKPT_DIR", "artifacts/checkpoints_1b"))
@@ -51,7 +60,7 @@ def main():
     print(f"Device: {device} — {torch.cuda.get_device_name(0)}")
 
     # Config
-    config = ModelConfig.preset_1b()
+    config = ModelConfig.from_toml(args.config)
     print(
         f"Config: {config.n_layers} layers, d={config.d_model}, "
         f"E={config.n_experts}, k={config.top_k}"

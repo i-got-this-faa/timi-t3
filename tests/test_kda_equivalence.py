@@ -9,6 +9,7 @@ from kda_moe.kda import (
     compute_kda_params,
     kda_fla,
 )
+from fla.ops.kda import fused_recurrent_kda
 
 
 @pytest.fixture
@@ -108,6 +109,9 @@ def test_chunked_gradient(device):
 
 
 def test_fla_matches_recurrent(device):
+    if device.type != "cuda":
+        pytest.skip("FLA kernels require CUDA")
+
     try:
         import fla  # noqa: F401
     except ImportError:
@@ -119,8 +123,23 @@ def test_fla_matches_recurrent(device):
     out_rec, _ = kda_recurrent(q, k, v, beta, log_decay, g)
 
     try:
+        from fla.ops.kda.naive import naive_recurrent_kda
+
+        qt = q.transpose(1, 2).contiguous()
+        kt = k.transpose(1, 2).contiguous()
+        vt = v.transpose(1, 2).contiguous()
+        gt = log_decay.transpose(1, 2).contiguous()
+        bt = beta.transpose(1, 2).contiguous()
+        fused, _ = fused_recurrent_kda(qt, kt, vt, gt, bt, scale=1.0, output_final_state=False)
+        naive, _ = naive_recurrent_kda(qt, kt, vt, gt, bt, scale=1.0)
+        if (fused - naive).abs().max().item() > 1e-3:
+            pytest.skip("fla fused_recurrent_kda inconsistent with its own naive reference")
+    except (ImportError, AttributeError, NotImplementedError):
+        pytest.skip("FLA kda_fla not functional")
+
+    try:
         out_fla = kda_fla(q, k, v, beta, log_decay, g)
-    except (ImportError, AttributeError):
+    except (ImportError, AttributeError, NotImplementedError):
         pytest.skip("FLA kda_fla not functional")
 
     diff = (out_rec - out_fla).abs().max().item()

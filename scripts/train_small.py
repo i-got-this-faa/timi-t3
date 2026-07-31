@@ -1,5 +1,6 @@
 """Quick 80M model training on ~150 MB of real data — for local inference testing."""
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -19,27 +20,38 @@ from kda_moe.train import Trainer
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="Path to TOML config (defaults to preset_80m + small-run overrides)",
+    )
+    args = parser.parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
     # ── Config ──────────────────────────────────────────────
-    config = ModelConfig.preset_80m()
-    # Match data_caps_gb from prepare_data_small.py for weighted sampling
-    config.data_caps_gb = {
-        "dclm": 0.05,
-        "fineweb": 0.04,
-        "code": 0.04,
-        "math": 0.05,
-        "tinystories": 0.03,
-    }
-    total_cap = sum(config.data_caps_gb.values())
-    config.data_mix = {k: v / total_cap for k, v in config.data_caps_gb.items()}
-    config.total_steps = 200
-    config.warmup_steps = 20
-    config.checkpoint_interval = 100
-    config.log_interval = 10
-    config.seq_len = 512
-    config.curriculum_start_seq = 512
+    if args.config:
+        config = ModelConfig.from_toml(args.config)
+    else:
+        config = ModelConfig.preset_80m()
+        # Match data_caps_gb from prepare_data_small.py for weighted sampling
+        config.data_caps_gb = {
+            "dclm": 0.05,
+            "fineweb": 0.04,
+            "code": 0.04,
+            "math": 0.05,
+            "tinystories": 0.03,
+        }
+        total_cap = sum(config.data_caps_gb.values())
+        config.data_mix = {k: v / total_cap for k, v in config.data_caps_gb.items()}
+        config.total_steps = 200
+        config.warmup_steps = 20
+        config.checkpoint_interval = 100
+        config.log_interval = 10
+        config.seq_len = 512
+        config.curriculum_start_seq = 512
 
     print(
         f"Config: {config.n_layers} layers, d={config.d_model}, "

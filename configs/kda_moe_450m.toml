@@ -1,10 +1,11 @@
-# KDA-MoE 450M — local RTX 4050 smoke config (plan.md §2.2)
+# KDA-MoE 450M — local RTX 4050 pilot config (plan.md §2.2, §6)
+# 64 experts / top-3 / 15 MoE layers + dense warmup
 
 [architecture]
 n_layers = 16
-d_model = 640
-n_heads = 10
-n_kv_heads = 2
+d_model = 768
+n_heads = 12
+n_kv_heads = 6
 head_dim = 64
 vocab_size = 32000
 
@@ -17,13 +18,13 @@ kda_use_fla = false
 
 [moe]
 use_moe = true
-n_experts = 32
-top_k = 2
-latent_dim = 320
-expert_hidden = 768
-shared_expert_hidden = 1280
+n_experts = 64
+top_k = 3
+latent_dim = 384
+expert_hidden = 640
+shared_expert_hidden = 1536
 aux_free_bias_update = 0.001
-z_loss_coeff = 0.0
+z_loss_coeff = 0.0001
 
 global_attn_layers = [3, 7, 11, 15]
 
@@ -31,30 +32,21 @@ global_attn_layers = [3, 7, 11, 15]
 seq_len = 2048
 curriculum_start_seq = 512
 curriculum_milestones = [[2000, 1024], [5000, 2048]]
-lr = 0.0003
+lr = 0.00015
+betas = [0.9, 0.95]
 weight_decay = 0.1
-warmup_steps = 100
+warmup_steps = 2000
 total_steps = 10000
-micro_batch_size = 1
-grad_accum_steps = 4
 clip_grad_norm = 1.0
-use_8bit_adam = true
+optimizer = "adamw"
+bf16 = true
+tf32 = true
+gradient_checkpointing = true
+compile_model = false
+ema = false
+ema_decay = 0.999
+micro_batch_size = 1
+grad_accum_steps = 16
 checkpoint_interval = 500
 full_checkpoint_interval = 2000
 log_interval = 10
-
-[data.data_mix]
-dclm = 0.45
-fineweb = 0.20
-code = 0.20
-math = 0.10
-tinystories = 0.03
-markdown = 0.02
-
-[data.data_caps_gb]
-dclm = 2.5
-fineweb = 2.0
-code = 2.5
-math = 1.0
-tinystories = 0.5
-markdown = 0.5

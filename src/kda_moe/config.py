@@ -14,6 +14,27 @@ from typing import Any, ClassVar
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "configs"
 
+# Shared pretraining corpus mix (tokens) and disk caps (GB). Kept in one place
+# so rebalancing the dataset is a one-line edit instead of a scavenger hunt
+# through every config file. Per-run configs may override via [data].
+DEFAULT_DATA_MIX: dict[str, float] = {
+    "dclm": 0.45,
+    "fineweb": 0.20,
+    "code": 0.20,
+    "math": 0.10,
+    "tinystories": 0.03,
+    "markdown": 0.02,
+}
+
+DEFAULT_DATA_CAPS_GB: dict[str, float] = {
+    "dclm": 2.5,
+    "fineweb": 2.0,
+    "code": 2.5,
+    "math": 1.0,
+    "tinystories": 0.5,
+    "markdown": 0.5,
+}
+
 
 def _to_toml(value: Any) -> Any:
     """Recursively convert Python types to TOML-compatible types."""
@@ -46,8 +67,13 @@ class ModelConfig:
     n_layers: int = 16
     d_model: int = 640
     n_heads: int = 10
-    n_kv_heads: int = 2  # GQA kv heads
+    n_kv_heads: int = 5  # GQA kv heads (2:1 for 10 heads)
     head_dim: int = 64
+    rms_norm_eps: float = 1e-6
+    initializer_std: float = 0.02
+    activation: str = "silu"  # dense FFN activation: silu | gelu
+    ffn_multiplier: float = 4.0  # dense-FFN hidden = d_model * this
+    use_sdpa: bool = True  # torch SDPA for the global GQA layers
 
     # ── KDA ─────────────────────────────────────────────────
     use_kda: bool = True
@@ -58,13 +84,13 @@ class ModelConfig:
 
     # ── MoE ─────────────────────────────────────────────────
     use_moe: bool = True
-    n_experts: int = 32
-    top_k: int = 2
+    n_experts: int = 96
+    top_k: int = 4
     latent_dim: int = 320
-    expert_hidden: int = 660
+    expert_hidden: int = 1320
     shared_expert_hidden: int = 640
-    aux_free_bias_update: float = 0.001  # per-step bias adjustment
-    z_loss_coeff: float = 0.0  # 0 = off; 1e-4 if router saturating
+    aux_free_bias_update: float = 0.001  # per optimizer-step bias adjustment
+    z_loss_coeff: float = 1e-4  # router-collapse insurance; 0 = off
 
     # ── global attention schedule ───────────────────────────
     global_attn_layers: tuple[int, ...] = (3, 7, 11, 15)
@@ -81,10 +107,24 @@ class ModelConfig:
     lr: float = 1.5e-4
     betas: tuple[float, float] = (0.9, 0.95)
     weight_decay: float = 0.1
-    warmup_steps: int = 200
+    warmup_steps: int = 2000
     total_steps: int = 10000
     clip_grad_norm: float = 1.0
-    use_8bit_adam: bool = True
+    optimizer: str = "adamw8bit"  # adamw | adamw8bit | lion | muon
+
+    # ── precision / perf ────────────────────────────────────
+    bf16: bool = True
+    tf32: bool = True
+    gradient_checkpointing: bool = False
+    compile_model: bool = False
+
+    # ── EMA ─────────────────────────────────────────────────
+    ema: bool = False
+    ema_decay: float = 0.999
+
+    # ── fused kernels (GPU-only; graceful fallback) ─────────
+    fused_rmsnorm: bool = False
+    fused_cross_entropy: bool = False
 
     # ── batch ───────────────────────────────────────────────
     micro_batch_size: int = 1
@@ -95,12 +135,15 @@ class ModelConfig:
     full_checkpoint_interval: int = 2000
     log_interval: int = 10
 
-    # ── data ────────────────────────────────────────────────
-    data_mix: dict[str, float] = field(default_factory=dict)
-    data_caps_gb: dict[str, float] = field(default_factory=dict)
+    # ── data (defaults shared across configs; override per run) ──
+    data_mix: dict[str, float] = field(default_factory=lambda: DEFAULT_DATA_MIX.copy())
+    data_caps_gb: dict[str, float] = field(default_factory=lambda: DEFAULT_DATA_CAPS_GB.copy())
 
-    # ── dropout (not used in v1; kept for dense baseline) ──
-    dropout: float = 0.0
+    # ── dropout (0 by default; finetuning presets set these) ──
+    dropout: float = 0.0  # legacy global dropout (dense baseline)
+    attention_dropout: float = 0.0
+    ffn_dropout: float = 0.0
+    residual_dropout: float = 0.0
 
     # TOML section layout used by to_toml.
     _SECTIONS: ClassVar[dict[str, list[str]]] = {
@@ -112,8 +155,16 @@ class ModelConfig:
             "n_heads",
             "n_kv_heads",
             "head_dim",
+            "rms_norm_eps",
+            "initializer_std",
+            "activation",
+            "ffn_multiplier",
+            "use_sdpa",
             "use_attn_res",
             "dropout",
+            "attention_dropout",
+            "ffn_dropout",
+            "residual_dropout",
         ],
         "kda": [
             "use_kda",
@@ -143,7 +194,15 @@ class ModelConfig:
             "warmup_steps",
             "total_steps",
             "clip_grad_norm",
-            "use_8bit_adam",
+            "optimizer",
+            "bf16",
+            "tf32",
+            "gradient_checkpointing",
+            "compile_model",
+            "ema",
+            "ema_decay",
+            "fused_rmsnorm",
+            "fused_cross_entropy",
             "micro_batch_size",
             "grad_accum_steps",
             "checkpoint_interval",
@@ -178,6 +237,12 @@ class ModelConfig:
             merged["curriculum_milestones"] = [
                 tuple(pair) for pair in merged["curriculum_milestones"]
             ]
+
+        # migrate legacy use_8bit_adam → optimizer
+        if "use_8bit_adam" in merged and "optimizer" not in merged:
+            merged["optimizer"] = "adamw8bit" if merged.pop("use_8bit_adam") else "adamw"
+        else:
+            merged.pop("use_8bit_adam", None)
 
         unknown = [k for k in merged if k not in cls.__dataclass_fields__]
         for k in unknown:

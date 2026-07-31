@@ -86,7 +86,7 @@ def kda_recurrent(
         b = beta_f[:, :, t].unsqueeze(-1).unsqueeze(-1)  # (B, H, 1, 1)
         S = X - b * corr + b * kv
 
-        o_t = torch.einsum("bhde,bhe->bhd", S, q_t)
+        o_t = torch.einsum("bhd,bhde->bhe", q_t, S)  # S^T q: o[v] = Σ_k q[k] S[k,v]
         outputs.append(o_t)
 
     output = torch.stack(outputs, dim=2)
@@ -152,7 +152,7 @@ def kda_chunked(
 
             S = (I - b_t * kk) @ a_diag @ S + b_t * kv
 
-            o_t = torch.einsum("bhde,bhe->bhd", S, q_t)
+            o_t = torch.einsum("bhd,bhde->bhe", q_t, S)  # S^T q
             outputs.append(o_t)
 
     output = torch.stack(outputs, dim=2)
@@ -241,6 +241,15 @@ def kda_fla(
 ) -> Tensor:
     """FLA-backed KDA. Import fla.ops.kda lazily.
 
+    Our q/k are L2-normalized, ``log_decay`` is already in log space, and
+    ``beta`` is already post-sigmoid — matching fla's KDA reference
+    formulation (KDA paper). So we pass the precomputed decay directly
+    (``use_gate_in_kernel=False``, ``use_qk_l2norm_in_kernel=False``,
+    ``use_beta_sigmoid_in_kernel=False``, ``scale=1.0``) and apply the
+    output gate ``g`` at the call site as usual.
+
+    fla wants ``(B, T, H, D)``; we convert from our ``(B, H, T, D)``.
+
     Raises ImportError with message 'FLA not available — use chunked PyTorch path'
     if the package is not installed.
     """
@@ -248,4 +257,19 @@ def kda_fla(
         from fla.ops.kda import fused_recurrent_kda  # type: ignore[import-untyped]
     except ImportError:
         raise ImportError("FLA not available — use chunked PyTorch path")
-    return fused_recurrent_kda(q, k, v, beta, log_decay, g)
+
+    out = fused_recurrent_kda(
+        q.transpose(1, 2).contiguous(),
+        k.transpose(1, 2).contiguous(),
+        v.transpose(1, 2).contiguous(),
+        log_decay.transpose(1, 2).contiguous(),
+        beta.transpose(1, 2).contiguous(),
+        scale=1.0,
+        use_qk_l2norm_in_kernel=False,
+        use_gate_in_kernel=False,
+        use_beta_sigmoid_in_kernel=False,
+        output_final_state=False,
+    )
+    if isinstance(out, tuple):
+        out = out[0]
+    return out.transpose(1, 2)  # back to (B, H, T, D)

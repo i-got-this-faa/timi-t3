@@ -1,11 +1,12 @@
 """P1 gate: one-shot data prep - download shards, train tokenizer, fertility check."""
 
+import argparse
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from kda_moe.config import ModelConfig
+from kda_moe.config import CONFIG_DIR, ModelConfig
 from kda_moe.data import build_pretraining_mix
 from kda_moe.data import print_dataset_report
 
@@ -14,11 +15,19 @@ from kda_moe.tokenizer import fertility_report, train_tokenizer
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config",
+        default=str(CONFIG_DIR / "kda_moe_450m.toml"),
+        help="Path to TOML config",
+    )
+    args = parser.parse_args()
+
     print("=" * 60)
     print("P1: Data pipeline + tokenizer")
     print("=" * 60)
 
-    config = ModelConfig.preset_450m()
+    config = ModelConfig.from_toml(args.config)
 
     print("\n[1/3] Building pretraining mix...")
     train_dir, val_dir = build_pretraining_mix("artifacts/data", config)

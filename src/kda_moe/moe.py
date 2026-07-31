@@ -57,16 +57,21 @@ class LatentMoE(nn.Module):
         expert_hidden: int = 660,
         shared_expert_hidden: int = 640,
         aux_free_bias_update: float = 0.001,
+        z_loss_coeff: float = 0.0,
+        eps: float = 1e-6,
+        std: float = 0.02,
     ):
         super().__init__()
         self.latent_dim = latent_dim
         self.n_experts = n_experts
         self.top_k = top_k
         self.half_h = expert_hidden // 2
+        self.z_loss_coeff = z_loss_coeff
         self.register_buffer("last_router_logits", torch.zeros(0))
+        self.last_z_loss: Tensor | None = None
 
         self.down_proj = nn.Linear(d_model, latent_dim, bias=False)
-        self.norm_down = RMSNorm(latent_dim)
+        self.norm_down = RMSNorm(latent_dim, eps=eps)
         self.router = SigmoidRouter(latent_dim, n_experts, top_k, aux_free_bias_update)
 
         # Expert weights: (E, l, h/2) for gate/up, (E, h/2, l) for down
@@ -76,14 +81,15 @@ class LatentMoE(nn.Module):
 
         self.shared_up = nn.Linear(latent_dim, shared_expert_hidden, bias=False)
         self.shared_down = nn.Linear(shared_expert_hidden, latent_dim, bias=False)
-        self.norm_out = RMSNorm(latent_dim)
+        self.norm_out = RMSNorm(latent_dim, eps=eps)
         self.up_proj = nn.Linear(latent_dim, d_model, bias=False)
+        self.std = std
         self.reset_parameters()
 
     def reset_parameters(self):
-        nn.init.normal_(self.expert_gate, std=0.02)
-        nn.init.normal_(self.expert_up, std=0.02)
-        nn.init.normal_(self.expert_down, std=0.02)
+        nn.init.normal_(self.expert_gate, std=self.std)
+        nn.init.normal_(self.expert_up, std=self.std)
+        nn.init.normal_(self.expert_down, std=self.std)
 
     def _dispatch_one_slot(self, h_flat: Tensor, idx_k: Tensor, w_k: Tensor) -> Tensor:
         """Grouped dispatch for one top-k slot.
@@ -139,6 +145,11 @@ class LatentMoE(nn.Module):
         h = self.norm_down(self.down_proj(x)).view(N, self.latent_dim)
         expert_idx, expert_w, router_logits = self.router(h)
         self.last_router_logits = router_logits.detach()
+        self.last_z_loss = (
+            (torch.logsumexp(router_logits, dim=-1) ** 2).mean()
+            if self.z_loss_coeff
+            else None
+        )
         self.router.update_bias(expert_idx)
 
         # Dispatch each top-k slot

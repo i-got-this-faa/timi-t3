@@ -16,6 +16,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from .config import ModelConfig
 from .model import KDAMoEModel
+from .optim import EMA, Lion, Muon
 
 
 def save_checkpoint(
@@ -24,8 +25,9 @@ def save_checkpoint(
     step: int,
     path: str,
     full: bool = False,
+    ema: EMA | None = None,
 ) -> None:
-    """Save model state_dict. Optionally save optimizer state."""
+    """Save model state_dict. Optionally save optimizer/EMA state."""
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), str(out.with_suffix(".pt")))
@@ -37,6 +39,7 @@ def save_checkpoint(
                 "step": step,
                 "model_state": model.state_dict(),
                 "optimizer_state": optimizer.state_dict(),
+                "ema_state": ema.state_dict() if ema is not None else None,
             },
             str(full_path),
         )
@@ -49,8 +52,9 @@ def load_checkpoint(
     optimizer: torch.optim.Optimizer | None,
     path: str,
     device: torch.device | None = None,
+    ema: EMA | None = None,
 ) -> int:
-    """Load model + optimizer state. Return step number."""
+    """Load model + optimizer (and EMA) state. Return step number."""
     p = Path(path)
     for ext in ("", ".pt", ".safetensors"):
         candidate = p.with_suffix(ext) if ext else p
@@ -65,6 +69,8 @@ def load_checkpoint(
         model.load_state_dict(ckpt["model_state"], strict=False)
         if optimizer is not None and "optimizer_state" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer_state"])
+        if ema is not None and ckpt.get("ema_state") is not None:
+            ema.load_state_dict(ckpt["ema_state"])
         return ckpt.get("step", 0)
     model.load_state_dict(ckpt, strict=False)
     return 0
@@ -127,27 +133,40 @@ class Trainer:
         self.tokens_processed = 0
         self.start_time = time.time()
         self.router_entropy_history: list[float] = []
+        self.ema = EMA(self.model, self.config.ema_decay) if self.config.ema else None
+        self._set_precision_flags()
+
+    def _set_precision_flags(self):
+        cfg = self.config
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = cfg.tf32
+            torch.backends.cudnn.allow_tf32 = cfg.tf32
+        if not cfg.bf16:
+            print("  bf16 disabled; running in fp32", flush=True)
 
     def _setup_optimizer(self):
         cfg = self.config
-        try:
-            import bitsandbytes as bnb
+        params = self.model.parameters()
+        if cfg.optimizer == "lion":
+            self.optimizer = Lion(params, lr=cfg.lr, betas=cfg.betas, weight_decay=cfg.weight_decay)
+        elif cfg.optimizer == "muon":
+            self.optimizer = Muon(params, lr=cfg.lr, betas=cfg.betas, weight_decay=cfg.weight_decay)
+        elif cfg.optimizer == "adamw8bit":
+            try:
+                import bitsandbytes as bnb
 
-            self.optimizer: torch.optim.Optimizer = bnb.optim.AdamW8bit(
-                self.model.parameters(),
-                lr=cfg.lr,
-                betas=cfg.betas,
-                weight_decay=cfg.weight_decay,
-            )
-            self.use_8bit = True
-        except ImportError:
+                self.optimizer = bnb.optim.AdamW8bit(
+                    params, lr=cfg.lr, betas=cfg.betas, weight_decay=cfg.weight_decay
+                )
+            except ImportError:
+                print("  bitsandbytes unavailable; falling back to adamw", flush=True)
+                self.optimizer = torch.optim.AdamW(
+                    params, lr=cfg.lr, betas=cfg.betas, weight_decay=cfg.weight_decay
+                )
+        else:  # adamw (default)
             self.optimizer = torch.optim.AdamW(
-                self.model.parameters(),
-                lr=cfg.lr,
-                betas=cfg.betas,
-                weight_decay=cfg.weight_decay,
+                params, lr=cfg.lr, betas=cfg.betas, weight_decay=cfg.weight_decay
             )
-            self.use_8bit = False
 
     def _try_resume(self):
         latest = _find_latest_checkpoint(str(self.checkpoint_dir))
@@ -155,7 +174,9 @@ class Trainer:
             return
         resume_step, ckpt_path = latest
         print(f"Resuming from step {resume_step}: {ckpt_path}")
-        loaded = load_checkpoint(self.model, self.optimizer, ckpt_path, device=self.device)
+        loaded = load_checkpoint(
+            self.model, self.optimizer, ckpt_path, device=self.device, ema=self.ema
+        )
         self.step = max(resume_step, loaded)
         for ms, sl in self.config.curriculum_milestones:
             if self.step >= ms:
@@ -239,9 +260,18 @@ class Trainer:
         total, _ = model.get_num_params()
         print(
             f"KDA-MoE 1B  |  {total / 1e6:.1f}M params  |  {cfg.total_steps} steps  |  "
-            f"8bit Adam={'on' if self.use_8bit else 'off'}",
+            f"optimizer={cfg.optimizer}"
+            f"{' | EMA' if cfg.ema else ''}"
+            f"{' | bf16' if cfg.bf16 else ''}",
             flush=True,
         )
+
+        if cfg.compile_model and torch.cuda.is_available():
+            try:
+                model = torch.compile(model)
+                print("  compiled model with torch.compile", flush=True)
+            except (RuntimeError, torch._dynamo.exc.TorchDynamoException):
+                print("  torch.compile failed; running eager", flush=True)
 
         display = StatusDisplay(cfg.total_steps, gpu_name, vram_total)
         train_iter = iter(self.train_dataset) if self.train_dataset else None
@@ -279,7 +309,8 @@ class Trainer:
                 if inputs.shape[1] < 1:
                     continue
 
-                with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                dtype = torch.bfloat16 if cfg.bf16 else torch.float32
+                with torch.autocast(device_type=self.device.type, dtype=dtype):
                     logits = model(inputs)
                     loss = model.loss_fn(logits, targets, ignore_index=-100)
                     loss = loss / cfg.grad_accum_steps
@@ -289,6 +320,9 @@ class Trainer:
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.clip_grad_norm)
             self.optimizer.step()
+
+            if self.ema is not None:
+                self.ema.update(model)
 
             self.step += 1
             tokens = cfg.micro_batch_size * self.current_seq_len * cfg.grad_accum_steps
@@ -352,6 +386,7 @@ class Trainer:
                     self.step,
                     str(self.checkpoint_dir / f"step_{self.step}.pt"),
                     full=(self.step % cfg.full_checkpoint_interval == 0),
+                    ema=self.ema,
                 )
 
             if not torch.isfinite(torch.tensor(accum_loss)):
@@ -363,6 +398,7 @@ class Trainer:
             self.step,
             str(self.checkpoint_dir / f"step_{self.step}.pt"),
             full=True,
+            ema=self.ema,
         )
         self.writer.close()
 

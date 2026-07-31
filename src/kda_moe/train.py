@@ -366,6 +366,7 @@ class Trainer:
         )
         self.writer.close()
 
+        display.stop()
         return {
             "final_loss": losses[-1] if losses else float("nan"),
             "total_steps": self.step,

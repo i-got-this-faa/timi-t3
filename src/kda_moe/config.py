@@ -1,11 +1,29 @@
-"""Model configuration dataclass with TOML I/O and presets."""
+"""Model configuration dataclass with TOML I/O and presets.
+
+Configs live in ``configs/*.toml``; the preset classmethods below are thin
+wrappers that load from those files so there is a single source of truth.
+"""
 
 from __future__ import annotations
 
 import tomllib
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
+
+CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "configs"
+
+
+def _to_toml(value: Any) -> Any:
+    """Recursively convert Python types to TOML-compatible types."""
+    if isinstance(value, tuple):
+        return [_to_toml(v) for v in value]
+    if isinstance(value, list):
+        return [_to_toml(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _to_toml(v) for k, v in value.items()}
+    return value
 
 
 @dataclass
@@ -17,6 +35,7 @@ class ModelConfig:
     Usage:
         cfg = ModelConfig.preset_1b()
         cfg = ModelConfig.from_toml("configs/kda_moe_1b.toml")
+        cfg.to_toml("configs/my_run.toml")
     """
 
     # ── vocabulary ──────────────────────────────────────────
@@ -83,8 +102,59 @@ class ModelConfig:
     # ── dropout (not used in v1; kept for dense baseline) ──
     dropout: float = 0.0
 
+    # TOML section layout used by to_toml.
+    _SECTIONS: ClassVar[dict[str, list[str]]] = {
+        "architecture": [
+            "vocab_size",
+            "pad_token_id",
+            "n_layers",
+            "d_model",
+            "n_heads",
+            "n_kv_heads",
+            "head_dim",
+            "use_attn_res",
+            "dropout",
+        ],
+        "kda": [
+            "use_kda",
+            "kda_kernel_size",
+            "kda_chunk_size",
+            "kda_g_min",
+            "kda_use_fla",
+        ],
+        "moe": [
+            "use_moe",
+            "n_experts",
+            "top_k",
+            "latent_dim",
+            "expert_hidden",
+            "shared_expert_hidden",
+            "aux_free_bias_update",
+            "z_loss_coeff",
+            "global_attn_layers",
+        ],
+        "training": [
+            "seq_len",
+            "curriculum_start_seq",
+            "curriculum_milestones",
+            "lr",
+            "betas",
+            "weight_decay",
+            "warmup_steps",
+            "total_steps",
+            "clip_grad_norm",
+            "use_8bit_adam",
+            "micro_batch_size",
+            "grad_accum_steps",
+            "checkpoint_interval",
+            "full_checkpoint_interval",
+            "log_interval",
+        ],
+        "data": ["data_mix", "data_caps_gb"],
+    }
+
     @classmethod
-    def from_toml(cls, path: str) -> ModelConfig:
+    def from_toml(cls, path: str | Path) -> ModelConfig:
         """Load config from a TOML file. Unknown keys warn but don't error."""
         with open(path, "rb") as f:
             raw = tomllib.load(f)
@@ -92,20 +162,11 @@ class ModelConfig:
         def _pop_section(section: str) -> dict[str, Any]:
             return {k: v for k, v in raw.pop(section, {}).items()}
 
-        arch = _pop_section("architecture")
-        kda = _pop_section("kda")
-        moe = _pop_section("moe")
-        training = _pop_section("training")
-        data_section = _pop_section("data")
-
-        # flatten
+        # flatten sections in order; leftover top-level keys act as overrides
         merged: dict[str, Any] = {}
-        merged.update(arch)
-        merged.update(kda)
-        merged.update(moe)
-        merged.update(training)
-        merged.update(data_section)
-        merged.update(raw)  # top-level overrides
+        for section in ("architecture", "kda", "moe", "training", "data"):
+            merged.update(_pop_section(section))
+        merged.update(raw)
 
         # handle tuple fields that come from TOML as lists
         for key in ("global_attn_layers", "betas"):
@@ -118,282 +179,58 @@ class ModelConfig:
                 tuple(pair) for pair in merged["curriculum_milestones"]
             ]
 
+        unknown = [k for k in merged if k not in cls.__dataclass_fields__]
+        for k in unknown:
+            warnings.warn(f"Unknown config key '{k}' in {path}; ignoring", stacklevel=2)
+
         return cls(**{k: v for k, v in merged.items() if k in cls.__dataclass_fields__})
 
+    def to_toml(self, path: str | Path) -> None:
+        """Serialize this config to a TOML file in the standard section layout."""
+        import tomli_w
+
+        out = {
+            section: {k: _to_toml(getattr(self, k)) for k in keys}
+            for section, keys in self._SECTIONS.items()
+        }
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "wb") as f:
+            tomli_w.dump(out, f)
+
     # ── presets ─────────────────────────────────────────────
+    # These load from configs/*.toml; the TOML files are the source of truth.
 
     @classmethod
     def preset_1b(cls) -> ModelConfig:
         """Primary 1B config (Colab T4).  plan.md §2.1."""
-        return cls(
-            n_layers=16,
-            d_model=640,
-            n_heads=10,
-            n_kv_heads=2,
-            head_dim=64,
-            use_kda=True,
-            use_moe=True,
-            n_experts=32,
-            top_k=2,
-            latent_dim=320,
-            expert_hidden=660,
-            shared_expert_hidden=640,
-            global_attn_layers=(3, 7, 11, 15),
-            seq_len=2048,
-            curriculum_start_seq=512,
-            curriculum_milestones=[(2000, 1024), (5000, 2048)],
-            lr=1.5e-4,
-            betas=(0.9, 0.95),
-            weight_decay=0.1,
-            warmup_steps=10,
-            total_steps=200,
-            micro_batch_size=1,
-            grad_accum_steps=4,
-            data_mix={
-                "dclm": 0.45,
-                "fineweb": 0.20,
-                "code": 0.20,
-                "math": 0.10,
-                "tinystories": 0.03,
-                "markdown": 0.02,
-            },
-            data_caps_gb={
-                "dclm": 2.5,
-                "fineweb": 2.0,
-                "code": 2.5,
-                "math": 1.0,
-                "tinystories": 0.5,
-                "markdown": 0.5,
-            },
-        )
+        return cls.from_toml(CONFIG_DIR / "kda_moe_1b.toml")
 
     @classmethod
     def preset_450m(cls) -> ModelConfig:
         """Smoke config for local RTX 4050.  plan.md §2.2."""
-        return cls(
-            n_layers=16,
-            d_model=640,
-            n_heads=10,
-            n_kv_heads=2,
-            head_dim=64,
-            use_kda=True,
-            use_moe=True,
-            n_experts=32,
-            top_k=2,
-            latent_dim=320,
-            expert_hidden=768,
-            shared_expert_hidden=1280,
-            global_attn_layers=(3, 7, 11, 15),
-            seq_len=2048,
-            curriculum_start_seq=512,
-            curriculum_milestones=[(2000, 1024), (5000, 2048)],
-            lr=3e-4,
-            betas=(0.9, 0.95),
-            weight_decay=0.1,
-            warmup_steps=100,
-            total_steps=10000,
-            micro_batch_size=1,
-            grad_accum_steps=4,
-            data_mix={
-                "dclm": 0.45,
-                "fineweb": 0.20,
-                "code": 0.20,
-                "math": 0.10,
-                "tinystories": 0.03,
-                "markdown": 0.02,
-            },
-            data_caps_gb={
-                "dclm": 2.5,
-                "fineweb": 2.0,
-                "code": 2.5,
-                "math": 1.0,
-                "tinystories": 0.5,
-                "markdown": 0.5,
-            },
-        )
+        return cls.from_toml(CONFIG_DIR / "kda_moe_450m.toml")
 
     @classmethod
     def preset_dense_100m(cls) -> ModelConfig:
         """Dense 100M control: 16-layer GQA+NoPE, no KDA, no MoE.  plan.md §2.3."""
-        return cls(
-            n_layers=16,
-            d_model=512,
-            n_heads=8,
-            n_kv_heads=2,
-            head_dim=64,
-            use_kda=False,
-            use_moe=False,
-            n_experts=0,
-            top_k=0,
-            latent_dim=512,
-            expert_hidden=2048,  # unused when use_moe=False, fallback FFN size
-            shared_expert_hidden=2048,
-            global_attn_layers=tuple(range(16)),  # all layers use GlobalGQA
-            seq_len=2048,
-            curriculum_start_seq=512,
-            curriculum_milestones=[(2000, 1024), (5000, 2048)],
-            lr=1.5e-4,
-            betas=(0.9, 0.95),
-            weight_decay=0.1,
-            warmup_steps=200,
-            total_steps=10000,
-            micro_batch_size=1,
-            grad_accum_steps=16,
-            dropout=0.0,
-        )
+        return cls.from_toml(CONFIG_DIR / "dense_100m.toml")
 
     @classmethod
     def preset_24m(cls) -> ModelConfig:
         """24M scaling-law variant: 4 layers, tiny dims, ultra-fast smoke."""
-        return cls(
-            n_layers=4,
-            d_model=256,
-            n_heads=4,
-            n_kv_heads=1,
-            head_dim=64,
-            use_kda=True,
-            use_moe=True,
-            n_experts=8,
-            top_k=2,
-            latent_dim=128,
-            expert_hidden=256,
-            shared_expert_hidden=256,
-            global_attn_layers=(3,),
-            seq_len=512,
-            curriculum_start_seq=512,
-            curriculum_milestones=[],
-            lr=3e-4,
-            betas=(0.9, 0.95),
-            weight_decay=0.1,
-            warmup_steps=20,
-            total_steps=500,
-            micro_batch_size=1,
-            grad_accum_steps=4,
-            checkpoint_interval=100,
-            log_interval=10,
-            data_mix={
-                "dclm": 0.45,
-                "fineweb": 0.20,
-                "code": 0.20,
-                "math": 0.10,
-                "tinystories": 0.03,
-                "markdown": 0.02,
-            },
-            data_caps_gb={
-                "dclm": 2.5,
-                "fineweb": 2.0,
-                "code": 2.5,
-                "math": 1.0,
-                "tinystories": 0.5,
-                "markdown": 0.5,
-            },
-        )
+        return cls.from_toml(CONFIG_DIR / "kda_moe_24m.toml")
 
     @classmethod
     def preset_80m(cls) -> ModelConfig:
         """80M scaling-law variant: 8 layers, moderate dims."""
-        return cls(
-            n_layers=8,
-            d_model=384,
-            n_heads=6,
-            n_kv_heads=1,
-            head_dim=64,
-            use_kda=True,
-            use_moe=True,
-            n_experts=16,
-            top_k=2,
-            latent_dim=192,
-            expert_hidden=384,
-            shared_expert_hidden=384,
-            global_attn_layers=(3, 7),
-            seq_len=512,
-            curriculum_start_seq=512,
-            curriculum_milestones=[],
-            lr=3e-4,
-            betas=(0.9, 0.95),
-            weight_decay=0.1,
-            warmup_steps=20,
-            total_steps=500,
-            micro_batch_size=1,
-            grad_accum_steps=4,
-            checkpoint_interval=100,
-            log_interval=10,
-            data_mix={
-                "dclm": 0.45,
-                "fineweb": 0.20,
-                "code": 0.20,
-                "math": 0.10,
-                "tinystories": 0.03,
-                "markdown": 0.02,
-            },
-            data_caps_gb={
-                "dclm": 2.5,
-                "fineweb": 2.0,
-                "code": 2.5,
-                "math": 1.0,
-                "tinystories": 0.5,
-                "markdown": 0.5,
-            },
-        )
+        return cls.from_toml(CONFIG_DIR / "kda_moe_80m.toml")
 
     @classmethod
     def preset_180m(cls) -> ModelConfig:
         """180M scaling-law variant: 12 layers, mid-scale dims."""
-        return cls(
-            n_layers=12,
-            d_model=512,
-            n_heads=8,
-            n_kv_heads=2,
-            head_dim=64,
-            use_kda=True,
-            use_moe=True,
-            n_experts=24,
-            top_k=2,
-            latent_dim=256,
-            expert_hidden=512,
-            shared_expert_hidden=512,
-            global_attn_layers=(3, 7, 11),
-            seq_len=512,
-            curriculum_start_seq=512,
-            curriculum_milestones=[],
-            lr=3e-4,
-            betas=(0.9, 0.95),
-            weight_decay=0.1,
-            warmup_steps=20,
-            total_steps=500,
-            micro_batch_size=1,
-            grad_accum_steps=4,
-            checkpoint_interval=100,
-            log_interval=10,
-            data_mix={
-                "dclm": 0.45,
-                "fineweb": 0.20,
-                "code": 0.20,
-                "math": 0.10,
-                "tinystories": 0.03,
-                "markdown": 0.02,
-            },
-            data_caps_gb={
-                "dclm": 2.5,
-                "fineweb": 2.0,
-                "code": 2.5,
-                "math": 1.0,
-                "tinystories": 0.5,
-                "markdown": 0.5,
-            },
-        )
+        return cls.from_toml(CONFIG_DIR / "kda_moe_180m.toml")
 
     @classmethod
     def preset_smoke(cls) -> ModelConfig:
         """Ultra-small smoke for fast local iteration.  450M with seq=128."""
-        cfg = cls.preset_450m()
-        cfg.seq_len = 128
-        cfg.curriculum_start_seq = 128
-        cfg.curriculum_milestones = []
-        cfg.micro_batch_size = 1
-        cfg.grad_accum_steps = 4
-        cfg.total_steps = 500
-        cfg.warmup_steps = 10
-        cfg.checkpoint_interval = 100
-        cfg.log_interval = 5
-        return cfg
+        return cls.from_toml(CONFIG_DIR / "smoke.toml")

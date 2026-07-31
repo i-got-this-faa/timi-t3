@@ -43,4 +43,18 @@ checkpoint_interval = 500
 full_checkpoint_interval = 2000
 log_interval = 10
 
-[data]
+[data.data_mix]
+dclm = 0.45
+fineweb = 0.20
+code = 0.20
+math = 0.10
+tinystories = 0.03
+markdown = 0.02
+
+[data.data_caps_gb]
+dclm = 2.5
+fineweb = 2.0
+code = 2.5
+math = 1.0
+tinystories = 0.5
+markdown = 0.5

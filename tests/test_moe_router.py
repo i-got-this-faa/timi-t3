@@ -82,7 +82,8 @@ def test_router_bias_update():
 
     x = torch.randn(64, 320)
     indices, _, _ = router(x)
-    router.update_bias(indices)
+    router.accumulate_bias(indices)
+    router.apply_bias()
 
     diff = (router.expert_bias - initial_bias).abs().max().item()
     assert diff > 0, f"Bias didn't change after update: diff={diff:.6f}"

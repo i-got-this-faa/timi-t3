@@ -342,13 +342,17 @@ class Trainer:
                         device=self.device,
                     )
                 else:
-                    try:
-                        batch = next(train_iter)
-                    except StopIteration:
-                        train_iter = iter(self.train_dataset)
-                        batch = next(train_iter)
-                    input_ids = batch.to(self.device)
-                    if input_ids.dim() == 1:
+                    # True micro-batching: stack micro_batch_size sequences per
+                    # micro-step so the config field actually shapes VRAM usage.
+                    seqs = []
+                    for _ in range(cfg.micro_batch_size):
+                        try:
+                            seqs.append(next(train_iter))
+                        except StopIteration:
+                            train_iter = iter(self.train_dataset)
+                            seqs.append(next(train_iter))
+                    input_ids = torch.stack(seqs).to(self.device)
+                    if input_ids.dim() == 1:  # degenerate safety (seq_len == 1)
                         input_ids = input_ids.unsqueeze(0)
 
                 targets = input_ids[:, 1:]

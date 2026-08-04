@@ -1,11 +1,15 @@
 """Unified training entry point: pretrain / smoke / dense control / SFT.
 
-Usage:
-    python scripts/train.py --config configs/kda_moe_24m.toml          # local smoke (real data if present)
-    python scripts/train.py --config configs/kda_moe_80m.toml          # small run on the 1GB language mix
-    python scripts/train.py --config configs/dense_100m.toml           # dense control
-    python scripts/train.py --config configs/kda_moe_1b.toml --colab   # 1B pilot (Colab: drive + OOM retry)
-    python scripts/train.py --config configs/kda_moe_1b.toml --sft     # FABLE.5 SFT
+Phases (plan.md §6/§7):
+    python scripts/train.py --config configs/kda_moe_24m.toml          # train: P5 pilot pretrain (config-driven)
+    python scripts/train.py --config configs/kda_moe_24m.toml --pre    # pre-train: P4 smoke, short budget
+    python scripts/train.py --config configs/kda_moe_1b.toml --post    # post-train: P7 FABLE.5 SFT
+    python scripts/train.py --config configs/dense_100m.toml           # dense control (train phase)
+    python scripts/train.py --config configs/kda_moe_1b.toml --colab   # 1B pilot on Colab (drive + OOM retry)
+
+Recipes set phase hyperparameters on top of the TOML; --set KEY=VALUE and
+--steps override them. --post loads the base checkpoint from --ckpt-dir
+(default: latest) and fine-tunes on FABLE.5 traces.
 
 Data:
     Reads shards from --data-dir/shards (default artifacts/data_small, written
@@ -17,7 +21,6 @@ Data:
 import argparse
 import os
 import sys
-from dataclasses import replace
 from pathlib import Path
 from typing import get_type_hints
 
@@ -39,6 +42,36 @@ GEN_PROMPTS = [
     "Once upon a time,",
     "The theory of relativity",
 ]
+
+# ── Phase recipes (plan.md §6 batch schedule / §7 phases) ────────────────────
+# Applied on top of the TOML config in main(); --set and --steps win over these.
+#
+# --pre   = P4 smoke pre-train: short budget, verify plumbing + dense warm-up.
+# (none)  = P5 pilot pretrain: the real run — config drives curriculum/budget.
+# --post  = P7 FABLE SFT: low LR fine-tune on post-train traces.
+
+PRETRAIN_RECIPE: dict[str, object] = {
+    "seq_len": 512,
+    "curriculum_start_seq": 512,
+    "curriculum_milestones": [],
+    "lr": 3e-4,
+    "warmup_steps": 20,
+    "total_steps": 200,
+    "micro_batch_size": 1,
+    "grad_accum_steps": 4,
+    "checkpoint_interval": 50,
+    "log_interval": 10,
+}
+
+POSTTRAIN_RECIPE: dict[str, object] = {
+    "lr": 1e-5,
+    "warmup_steps": 50,
+    "total_steps": 1000,
+    "micro_batch_size": 1,  # SFT sequences run up to 2048 tokens — plan.md §6 microbatch 1
+    "grad_accum_steps": 4,
+    "checkpoint_interval": 200,
+    "log_interval": 20,
+}
 
 
 class SFTTrainer(Trainer):
@@ -74,9 +107,10 @@ class SFTTrainer(Trainer):
 
             for micro_step in range(cfg.grad_accum_steps):
                 idx = (step * cfg.grad_accum_steps + micro_step) % n
-                input_ids = input_ids_all[idx : idx + 1].to(self.device)
-                labels = labels_all[idx : idx + 1].to(self.device)
-                mask = loss_mask_all[idx : idx + 1].to(self.device)
+                b = cfg.micro_batch_size
+                input_ids = input_ids_all[idx : idx + b].to(self.device)
+                labels = labels_all[idx : idx + b].to(self.device)
+                mask = loss_mask_all[idx : idx + b].to(self.device)
 
                 if input_ids.shape[1] < 2:
                     continue
@@ -108,7 +142,7 @@ class SFTTrainer(Trainer):
 
             if step % cfg.log_interval == 0:
                 print(
-                    f"step {step:5d}/{cfg.total_steps} | tokens {tokens_processed/1e6:7.1f}M | "
+                    f"step {step:5d}/{cfg.total_steps} | tokens {tokens_processed / 1e6:7.1f}M | "
                     f"loss {accum_loss:.4f} | lr {lr:.2e}"
                 )
 
@@ -169,7 +203,9 @@ def run_generation(model, tokenizer, device, max_new_tokens: int = 30):
         print("  (no tokenizer — skipped)")
         return
     for prompt in GEN_PROMPTS:
-        completion = generate(model, tokenizer, prompt, max_new_tokens=max_new_tokens, device=device)
+        completion = generate(
+            model, tokenizer, prompt, max_new_tokens=max_new_tokens, device=device
+        )
         print(f"  {prompt!r} -> {completion!r}")
 
 
@@ -232,7 +268,7 @@ def run_pretrain(config: ModelConfig, args) -> None:
             sys.exit(1)
 
     tok = stats["tokens_processed"]
-    tok_s = f"{tok/1e9:.2f}B" if tok >= 1e9 else f"{tok/1e6:.1f}M"
+    tok_s = f"{tok / 1e9:.2f}B" if tok >= 1e9 else f"{tok / 1e6:.1f}M"
     print(
         f"\nTraining complete: {stats['total_steps']} steps, {tok_s} tokens seen, "
         f"final_loss={stats['final_loss']:.4f}, tok/s={stats['tok_per_sec']:.0f}"
@@ -266,19 +302,9 @@ def run_sft(config: ModelConfig, args) -> None:
     sft_data = tokenize_sft_dataset(traces, tokenizer, max_seq_len=2048)
     print(f"Tokenized: {sft_data['input_ids'].shape[0]} sequences")
 
-    sft_config = replace(
-        config,
-        lr=1e-5,
-        total_steps=args.steps or 1000,
-        warmup_steps=50,
-        grad_accum_steps=4,
-        checkpoint_interval=200,
-        log_interval=20,
-    )
-
     trainer = SFTTrainer(
         model=model,
-        config=sft_config,
+        config=config,  # POSTTRAIN_RECIPE already applied in main()
         checkpoint_dir=args.ckpt_dir,
         log_dir=args.log_dir,
         sft_data=sft_data,
@@ -313,10 +339,24 @@ def _coerce(field_type, raw: str):
     if origin in (tuple, list):
         items = [x.strip() for x in raw.split(",") if x.strip()]
         inner = args[0] if args else str
-        return tuple(_coerce(inner, x) for x in items) if origin is tuple else [
-            _coerce(inner, x) for x in items
-        ]
+        return (
+            tuple(_coerce(inner, x) for x in items)
+            if origin is tuple
+            else [_coerce(inner, x) for x in items]
+        )
     return raw  # str and anything else pass through
+
+
+def apply_recipe(config: ModelConfig, recipe: dict[str, object]) -> list[str]:
+    """Apply a phase recipe (typed dict) to the config. Returns the keys applied."""
+    types = get_type_hints(ModelConfig)
+    applied = []
+    for key, val in recipe.items():
+        if key not in types:
+            raise SystemExit(f"Recipe references unknown config field: {key!r}")
+        setattr(config, key, val)
+        applied.append(key)
+    return applied
 
 
 def apply_overrides(config: ModelConfig, overrides: list[str]) -> list[str]:
@@ -343,11 +383,17 @@ def main():
         default=str(CONFIG_DIR / "kda_moe_24m.toml"),
         help="Path to TOML config",
     )
-    parser.add_argument("--data-dir", default="artifacts/data_small", help="dir with shards/ + val/")
     parser.add_argument(
-        "--tokenizer", default="artifacts/tokenizer_small/tokenizer.json", help="tokenizer.json path"
+        "--data-dir", default="artifacts/data_small", help="dir with shards/ + val/"
     )
-    parser.add_argument("--ckpt-dir", default=None, help="default: artifacts/checkpoints/<config stem>")
+    parser.add_argument(
+        "--tokenizer",
+        default="artifacts/tokenizer_small/tokenizer.json",
+        help="tokenizer.json path",
+    )
+    parser.add_argument(
+        "--ckpt-dir", default=None, help="default: artifacts/checkpoints/<config stem>"
+    )
     parser.add_argument("--log-dir", default=None, help="default: artifacts/logs/<config stem>")
     parser.add_argument("--steps", type=int, default=None, help="override total_steps")
     parser.add_argument(
@@ -360,22 +406,50 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--cpu", action="store_true", help="force CPU")
     parser.add_argument("--no-gen", action="store_true", help="skip post-training generation check")
-    parser.add_argument("--colab", action="store_true", help="Colab mode: mount Drive, CUDA assert, OOM retry")
-    parser.add_argument("--sft", action="store_true", help="FABLE.5 SFT fine-tune instead of pretrain")
-    parser.add_argument("--base-ckpt", default=None, help="base checkpoint for SFT (default: latest in ckpt-dir)")
-    parser.add_argument("--sft-rows", type=int, default=5000, help="max FABLE traces for SFT")
+    parser.add_argument(
+        "--colab", action="store_true", help="Colab mode: mount Drive, CUDA assert, OOM retry"
+    )
+    phase = parser.add_mutually_exclusive_group()
+    phase.add_argument(
+        "--pre", action="store_true", help="pre-train recipe: short P4 smoke run (plan.md §7)"
+    )
+    phase.add_argument(
+        "--post",
+        action="store_true",
+        help="post-train recipe: FABLE.5 SFT on base ckpt (plan.md §7 P7)",
+    )
+    parser.add_argument(
+        "--base-ckpt", default=None, help="base checkpoint for --post (default: latest in ckpt-dir)"
+    )
+    parser.add_argument("--sft-rows", type=int, default=5000, help="max FABLE traces for --post")
     args = parser.parse_args()
 
     apply_triton_patch()
     torch.manual_seed(args.seed)
 
     config = ModelConfig.from_toml(args.config)
-    applied = apply_overrides(config, args.set)
+
+    if args.pre:
+        phase_name = "pre-train (P4 smoke)"
+        recipe = PRETRAIN_RECIPE
+    elif args.post:
+        phase_name = "post-train (P7 FABLE SFT)"
+        recipe = POSTTRAIN_RECIPE
+    else:
+        phase_name = "train (P5 pilot pretrain)"
+        recipe = None
+
+    applied: list[str] = []
+    if recipe is not None:
+        applied = apply_recipe(config, recipe)
+    applied += apply_overrides(config, args.set)
     if args.steps is not None:
         config.total_steps = args.steps
         applied.append("total_steps")
+
+    print(f"Phase: {phase_name}")
     if applied:
-        print(f"Overrides: {', '.join(f'{k}={getattr(config, k)}' for k in applied)}")
+        print(f"Recipe/overrides: {', '.join(f'{k}={getattr(config, k)}' for k in applied)}")
 
     stem = Path(args.config).stem
     args.ckpt_dir = args.ckpt_dir or f"artifacts/checkpoints/{stem}"
@@ -395,7 +469,7 @@ def main():
         if not torch.cuda.is_available():
             raise SystemExit("CUDA required for --colab training")
 
-    if args.sft:
+    if args.post:
         run_sft(config, args)
     else:
         run_pretrain(config, args)
